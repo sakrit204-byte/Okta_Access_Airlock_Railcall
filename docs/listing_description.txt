@@ -1,16 +1,61 @@
-Governed Okta administration for small regulated teams. Every write is held behind the
-RailCall airlock and sealed into a signed receipt, and every change is reconciled against
-Okta's own System Log so custody can be proven rather than assumed.
+An AI agent holding Okta admin is the most dangerous credential in your company. It can
+deactivate your CEO, wipe MFA off your finance lead, delete a group and silently strip
+forty people of application access, or grant itself Super Administrator. Four ordinary
+API calls, under a second, no preview and no way back. Which is why the honest answer to
+"should I connect an agent to my identity provider" has been no. This changes it.
 
-STATUS: foundation in progress. 2 commands are implemented and verified against the gate;
-the full surface is 36. This description is rewritten from the manifest as commands land.
+STATUS: foundation in progress. 2 commands implemented and verified against the publish
+gate; planned surface is 36. The count is generated from the manifest, never typed by
+hand.
 
-AUTHENTICATION: OAuth 2.0 service app using private_key_jwt. Static SSWS API tokens are
-deliberately not supported. An SSWS token carries no scopes at all and inherits the full
-privileges of whoever created it, which means it cannot express the boundary this module
-exists to enforce. A scoped OAuth grant can: if the airlock were bypassed entirely, a read
-scoped token still could not deactivate anybody.
+FOR: teams putting an agent near identity, and small teams carrying a compliance
+obligation without budget for Okta Identity Governance, an add on at roughly four to
+eleven dollars per user per month.
 
-TRUST SURFACE: credentials resolve through the Station vault only, never from a file on
-disk. Network egress is allowlisted to the configured Okta org. No subprocess. No
-filesystem writes. Secrets are redacted from every returned envelope and every error.
+WHY IT IS DIFFERENT: most governed integrations must infer whether a change was
+authorised, because the provider keeps no usable history. Okta keeps a System Log
+recording the actor, timestamp and client IP of every administrative event. So each
+change gets a verdict rather than an estimate: governed and bound to a specific
+approval, ungoverned and attributed to a named admin at a named time from a named
+address, or unproven, reported as unproven rather than guessed.
+
+THREE THINGS A SPREADSHEET CANNOT DO. Blast radius before you act: which applications a
+person loses on deactivation, which groups they remain in, which admin roles vanish,
+which groups they own become ownerless, and how many live sessions and refresh tokens
+survive. There is no single off switch in Okta and this does not pretend there is.
+Dormant administrator detection: who holds standing admin with no administrative action
+in ninety days, which requires joining role assignments against System Log activity and
+cannot be exported from anywhere. A signed evidence chain that verifies offline months
+later and records every action refused, not only those performed.
+
+AUTHENTICATION: OAuth 2.0 service app using private_key_jwt. Static SSWS tokens are
+deliberately unsupported: they carry no scopes and inherit the full privileges of
+whoever created them, so they cannot express the boundary this exists to enforce. A
+scoped grant can, giving two independent boundaries rather than one. The scope grant is
+structural, the airlock procedural. Stated plainly: if the airlock were bypassed
+entirely, a read scoped token still could not deactivate anybody. Read scopes alone are
+supported, and every capability above works without a single write scope.
+
+TRUST SURFACE: credentials resolve through the Station vault only, never a file on disk,
+and setup generates the key pair locally so Okta never holds the private half. Egress is
+allowlisted to the configured org; any other host is refused before the request is sent.
+No subprocess, no filesystem writes, and secrets are redacted from every envelope and
+error. Ambiguous outcomes fail closed: a write Okta does not answer is recorded as
+unresolved, carrying the attempt and the prior state, and is reported as neither success
+nor failure.
+
+KNOWN LIMITATIONS, kept current rather than written at the end. Okta publishes no
+maximum System Log delivery latency, so verdicts carry the log watermark they were
+computed against and report that no ungoverned change was visible as of that timestamp,
+never that none occurred. Removing a user from a rule managed group causes Okta to add
+them to that rule's exception list permanently, affecting every other member, so
+previews name the rule first. Okta's search parameter reads from an eventually
+consistent datasource, so anything feeding a write uses filter instead. Deactivating a
+user does not remove their group memberships. There is no delete user command, by
+design.
+
+This produces evidence a human reviews: a human in the loop record, not a certified
+compliance product, satisfying no control in SOC 2 or ISO 27001 by itself. Independent
+project, not affiliated with or endorsed by Okta, Inc. Okta is a trademark of Okta, Inc.
+
+contest:round2

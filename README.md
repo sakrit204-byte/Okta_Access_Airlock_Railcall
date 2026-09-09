@@ -1,25 +1,69 @@
 # Okta Access Airlock
 
-Governed Okta administration for RailCall. An AI agent holding Okta admin is the most
-dangerous credential in a company. This module is the ceiling that stops it, and the
-receipt that proves what it did.
+**An AI agent holding Okta admin is the most dangerous credential in your company.**
+It can deactivate your CEO, wipe MFA off your finance lead, delete a group and silently
+strip forty people of application access, or grant itself Super Administrator. None of
+that is exotic. It is four ordinary API calls that any agent with the right token can
+make in under a second, with no preview and no way back.
 
-Every write is held behind the RailCall airlock: preview, then human approval, then
-execute, then a signed receipt. Every change is then reconciled against Okta's own
-System Log, so custody can be proven rather than assumed.
+Which is why the honest answer to "should I connect an agent to my identity provider"
+has been **no**.
+
+This module changes that answer. It is the ceiling that stops the agent, and the receipt
+that proves what it did.
+
+## What it does
+
+Every write goes through the RailCall airlock: preview, then human approval, then
+execute, then a signed receipt. Nothing moves without a person.
+
+Then it does the part most integrations cannot. It reconciles every change against
+**Okta's own System Log**, which records the actor, the timestamp and the client IP for
+every administrative event. So for any change you can ask which of three things it was:
+
+* **governed**, bound to a specific approval
+* **ungoverned**, made by a named admin in the console at a specific time from a
+  specific address
+* **unproven**, meaning we cannot account for it and say so rather than guessing
+
+Most integrations have to infer that. Okta can be asked.
 
 ## Who this is for
 
-A team of ten to fifty people going through SOC 2 or ISO 27001, with one person who
-carries compliance alongside another job, who is asked every quarter to evidence who
-had access to what and who approved it. That evidence is usually assembled by hand from
-spreadsheets and screenshots. This produces the same answer, generated and signed.
+**Teams putting an agent anywhere near their identity provider.** RailCall exposes
+installed modules to Claude Desktop, Cursor, Windsurf and Zed over MCP. The moment any
+Okta module is installed, an agent can call it. This is the module that makes that
+survivable.
+
+**Small teams carrying a compliance obligation.** Ten to fifty people, one person who
+owns compliance alongside another job, going through SOC 2 or ISO 27001. Okta sells the
+governed answer to this as an add on at roughly four to eleven dollars per user per
+month, and access certification is not available standalone. Below a certain size that
+maths does not work, and the review gets done by hand in a spreadsheet.
+
+## Three things you get that a spreadsheet cannot give you
+
+**1. A safe blast radius before you act.** Before deactivating someone, see which
+applications they lose, which groups they *stay in*, which admin roles vanish, which
+groups they own become ownerless, and how many live sessions and refresh tokens survive
+the deactivation. There is no single off switch in Okta, and this module does not
+pretend there is one.
+
+**2. Dormant administrator detection.** Who holds a standing admin role and has not
+performed a single administrative action in ninety days. Answering that means joining
+role assignments against System Log activity. No CSV export can do it, at any team size.
+
+**3. A signed evidence trail.** Not a report you assemble, a chain you can verify
+offline months later, including every action the module refused.
 
 ## Status
 
-Early. The foundation is in place and passes the marketplace publish gate. Two of the
-planned thirty six commands are implemented. See `docs/LIMITATIONS.md`, which is kept
-current rather than written at the end.
+Early and honest about it. The foundation is in place and passes the marketplace publish
+gate. Two of the planned thirty six commands are implemented.
+
+`docs/LIMITATIONS.md` is kept current as the module is built rather than written at the
+end, and it already records four specific Okta behaviours that constrain what this
+module can claim.
 
 ## Quick start
 
@@ -30,16 +74,19 @@ curl -fsSL https://railcall.ai/install.sh | bash
 railcall version
 ```
 
-Python 3 must be on your PATH before you run this. On Windows the Microsoft Store
-placeholder at `WindowsApps\python` is not Python and the installer will stop on it.
+Python 3 must be on your PATH first. On Windows the Microsoft Store placeholder at
+`WindowsApps\python` is not Python and the installer will stop on it.
 
 ### 2. Create an Okta OAuth service app
 
-In your Okta admin console, create an API Services application. Set the client
-authentication method to **Public key / Private key** and add a public key in JWK form.
-Keep the matching private key; it stays on your machine and is never uploaded anywhere.
+In your Okta admin console, create an **API Services** application. Set client
+authentication to **Public key / Private key**.
 
-Grant only the scopes you actually want this module to hold. Read scopes:
+Generate the key pair yourself and paste only the public half into Okta, so the private
+key never leaves your machine and Okta never holds it. Okta accepts a JWK in that field.
+`docs/SETUP.md` has the exact steps.
+
+Grant only the scopes you want this module to hold:
 
 * `okta.users.read`
 * `okta.groups.read`
@@ -53,10 +100,14 @@ Write scopes, only if you want the corresponding commands to work at all:
 * `okta.groups.manage`
 * `okta.roles.manage`
 
-Granting nothing but read scopes is a supported and sensible way to run this module.
-`org.verify_connection` will tell you exactly which commands that costs you.
+**Granting read scopes only is a supported and sensible way to run this.** Everything in
+the list above under "three things you get" works without a single write scope.
 
-### 3. Store the credential in the Station vault
+Assign the application an admin role. **Read Only Administrator** is enough for the read
+scopes, and it is the right choice. Super Administrator would collapse the boundary this
+module exists to create.
+
+### 3. Store the credential
 
 ```
 railcall set okta '{"org_url":"https://your.okta.com","client_id":"0oa...","key_id":"...","private_key":"-----BEGIN PRIVATE KEY-----\n..."}'
@@ -67,51 +118,50 @@ never written to this repository.
 
 ### 4. Verify
 
-```
-railcall market install sakrit204/okta_access_airlock
-```
-
-Then run `org.verify_connection` from Studio. It probes every scope you granted and
-names each missing one alongside the exact commands it blocks, so the first run tells
-you what you can and cannot do rather than failing later on a command you needed.
+Run `org.verify_connection`. It probes every scope you granted and names each missing
+one alongside the exact commands it blocks, so the first run tells you what you can and
+cannot do rather than failing later on the command you needed.
 
 ## Why OAuth and not an API token
 
-Okta offers two ways for a machine to authenticate. They are not equivalent.
+Okta offers two ways for a machine to authenticate. They are not equivalent, and the
+difference is the whole security argument of this module.
 
 A static SSWS API token has **no scopes at all**. It inherits the full privileges of
-whichever admin created it, it does not expire on its own, and anybody who copies the
-string has everything the token has. There is no way to say "this may only read users."
+whichever admin created it, it does not expire on its own, and anyone who copies the
+string has everything it has. There is no way to say "this may only read users."
 
 An OAuth service app using `private_key_jwt` is scoped, short lived, and authenticated
-with a signature rather than a shared string. That gives this module two independent
-boundaries instead of one:
+with a signature rather than a shared string. That gives you two independent boundaries
+instead of one:
 
 * The **OAuth scope grant** is structural. The token cannot deactivate a user unless an
   Okta admin granted `okta.users.manage`.
 * The **RailCall airlock** is procedural. Even with the scope, a human approves the call.
 
-Which is the point: if the airlock were bypassed entirely, a read scoped token still
-could not deactivate anybody. Okta itself recommends against static API tokens. This
-module does not support them, on purpose.
+Which is the point worth stating plainly: **if the airlock were bypassed entirely, a
+read scoped token still could not deactivate anybody.**
+
+Okta itself recommends against static API tokens. This module does not support them, on
+purpose.
 
 ## Trust surface
 
 * Credentials resolve through the Station vault only. This module never reads a
   credentials file from disk.
-* Network egress is allowlisted to the configured Okta org. A request to any other host
+* Network egress is allowlisted to your configured Okta org. A request to any other host
   is refused before it is sent.
-* No subprocess. No filesystem writes. Both declared in `module.json` where they are
+* No subprocess. No filesystem writes. Both declared in `module.json`, where they are
   machine checkable rather than merely claimed.
-* Secrets are redacted from every returned envelope and from every error, including the
-  ones raised by failures nobody planned for.
-* Ambiguous outcomes fail closed. A write that Okta does not answer is recorded as
+* Secrets are redacted from every returned envelope and every error, including the ones
+  raised by failures nobody planned for.
+* Ambiguous outcomes fail closed. A write Okta does not answer is recorded as
   `unresolved`, carrying what was attempted and the prior state, and is reported as
   neither success nor failure.
 
 ## Command surface
 
-Two commands are implemented today. The planned surface is thirty six, in six groups:
+Two implemented today. The planned surface is thirty six, in six groups:
 
 * **Posture and connection.** Scope probing, org description, standing admin inventory,
   rate limit headroom.
@@ -120,35 +170,41 @@ Two commands are implemented today. The planned surface is thirty six, in six gr
   survives it, and why a given person can reach a given application at all.
 * **Plan.** Every write has a planning twin that snapshots and fingerprints the exact
   state it intends to change.
-* **Apply.** The writes. Each one re reads, re hashes, and refuses if anything moved
-  since the human approved it.
-* **Custody, ledger and evidence.** Reconciliation against the Okta System Log, and the
-  signed evidence bundle.
+* **Apply.** The writes. Each re reads, re hashes, and refuses if anything moved since
+  the human approved it.
+* **Custody, ledger and evidence.** Reconciliation against the System Log, and the signed
+  evidence bundle.
 
 There is deliberately no command that deletes a user. Deletion is permanent, it adds
-nothing over deactivation for access review, and shipping it would put the worst
-available outcome one approved click away.
+nothing over deactivation for this use case, and shipping it would put the worst
+available outcome one approved click away from an agent.
 
 ## Development
 
-Lint the bundle against the real marketplace gate at any time. This is free and rate
-limited at sixty calls a minute, unlike publishing, which is capped at five an hour.
+Lint against the real marketplace gate at any time. Free, and rate limited at sixty
+calls a minute, unlike publishing which is capped at five an hour.
 
 ```
 python tools/lint_listing.py
 ```
 
-Run the tests:
+Run the offline contract tests:
 
 ```
 python -m unittest discover tests
 ```
 
+Probe a live org, read only, changing nothing:
+
+```
+python tools/live_probe.py
+```
+
 ## Documentation
 
-* `docs/SETUP.md` covers the Okta service app in more detail.
-* `docs/LIMITATIONS.md` records what this module cannot do and why, including specific
-  Okta behaviours that constrain it.
+* `docs/SETUP.md` covers the Okta service app in detail, including generating the key
+  pair locally so Okta never holds your private key.
+* `docs/LIMITATIONS.md` records what this module cannot do and why.
 * `docs/TESTING.md` records what has actually been run against a live org.
 
 ## License

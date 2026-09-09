@@ -26,6 +26,12 @@ PAYLOAD_MANIFEST_KEY = "module_json"
 PAYLOAD_HANDLER_KEY = "handler_py"
 MINIMUM_HANDLER_BYTES = 200
 
+# The gate rejects a longer description with a bare HTTP 400 rather than a lint
+# finding, so it is checked here first. Note that both Round 1 winning listings run
+# well past this, at 5978 and 7540 characters, so the cap arrived after they
+# published and their length is not a target we can match.
+MAXIMUM_DESCRIPTION_CHARS = 4096
+
 
 def load_bundle():
     manifest_path = ROOT / "module.json"
@@ -45,6 +51,14 @@ def local_checks(manifest, handler, description):
 
     if len(handler.encode("utf8")) < MINIMUM_HANDLER_BYTES:
         problems.append("handler.py is under the 200 byte trivial handler threshold")
+
+    if len(description) > MAXIMUM_DESCRIPTION_CHARS:
+        problems.append(
+            "description is "
+            + str(len(description))
+            + " characters, over the gate limit of "
+            + str(MAXIMUM_DESCRIPTION_CHARS)
+        )
 
     for command in commands:
         cid = command.get("id")
