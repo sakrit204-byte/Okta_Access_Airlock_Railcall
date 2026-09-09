@@ -41,6 +41,31 @@ belong in layer 2.
 Recorded here as it is gathered, against a real Okta developer org. Nothing in this
 section is written before it has actually been run.
 
+### The org this is developed against
+
+An **Okta Integrator Free Plan** org. This is the successor to the old Developer
+Edition org, and it was chosen over the thirty day Okta Platform trial for one reason:
+it does not expire, so the module stays testable after the first month rather than
+becoming unmaintainable.
+
+What it gives us:
+
+* A real Okta org and the real Management API. There are no mocks in this project.
+* Lifecycle Management, which is what group rules run on. Group rule behaviour is
+  central to this module, so an org without it would be useless here.
+* API Access Management, and API Services applications authenticating with
+  `private_key_jwt`.
+* The System Log, which is the independent source of truth the custody commands
+  reconcile against.
+
+What it constrains, stated plainly:
+
+* **Ten active users.** Every code path can be exercised at that size, but population
+  scale cannot be demonstrated by having a large population. Paging is therefore
+  exercised by lowering the page size rather than by holding thousands of users, and no
+  claim is made about behaviour at a scale that was never run.
+* The org deactivates after ninety consecutive days with no sign in.
+
 ### Status
 
 Not yet started. The Okta org is being created and the service application configured.

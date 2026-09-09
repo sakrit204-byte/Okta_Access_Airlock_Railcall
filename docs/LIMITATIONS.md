@@ -93,7 +93,24 @@ Stating these so nobody assumes coverage that does not exist:
 * **No AI or language model commands.** The purpose of this module is to constrain
   agents. Embedding one would blur that.
 
-## 7. Scope of the claim
+## 7. What the development org could not prove
+
+**verified**
+
+This module is developed against an Okta Integrator Free Plan org, which caps at ten
+active users. That is enough to exercise every code path, and it is not enough to
+demonstrate behaviour at scale.
+
+Paging is therefore tested by lowering the page size until a set spans several pages,
+which proves the paging logic but not that a directory of several thousand users
+behaves the same way. Rate limit accounting reads Okta's own response headers, so it
+should hold at any size, but that has been reasoned about rather than observed under
+real pressure.
+
+Where a claim in this repository depends on scale that was never run, it says so. No
+number in the documentation is an extrapolation presented as a measurement.
+
+## 8. Scope of the claim
 
 This module produces evidence that a human reviews. It is a human in the loop record,
 not a certified compliance product, and it does not by itself satisfy any control in
