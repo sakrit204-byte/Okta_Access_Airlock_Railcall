@@ -1,0 +1,33 @@
+{
+  "id": "sakrit204/okta_access_airlock",
+  "slug": "sakrit204/okta_access_airlock",
+  "version": "0.1.0",
+  "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",
+  "auth": {
+    "type": "oauth2",
+    "provider": "okta",
+    "vault_key": "okta"
+  },
+  "license_required": false,
+  "requires": {
+    "network": ["*.okta.com", "*.oktapreview.com"],
+    "subprocess": false,
+    "filesystem_writes": []
+  },
+  "commands": [
+    {
+      "id": "org.verify_connection",
+      "title": "Verify connection",
+      "description": "Probe every granted OAuth scope and name each missing one alongside the commands it blocks.",
+      "side_effects": "none",
+      "input_schema": {}
+    },
+    {
+      "id": "org.rate_budget",
+      "title": "Rate limit headroom",
+      "description": "Report the remaining Okta rate limit headroom per endpoint bucket, so a bulk plan is never started that cannot finish.",
+      "side_effects": "none",
+      "input_schema": {}
+    }
+  ]
+}

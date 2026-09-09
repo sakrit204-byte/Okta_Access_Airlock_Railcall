@@ -1,0 +1,16 @@
+Governed Okta administration for small regulated teams. Every write is held behind the
+RailCall airlock and sealed into a signed receipt, and every change is reconciled against
+Okta's own System Log so custody can be proven rather than assumed.
+
+STATUS: foundation in progress. 2 commands are implemented and verified against the gate;
+the full surface is 36. This description is rewritten from the manifest as commands land.
+
+AUTHENTICATION: OAuth 2.0 service app using private_key_jwt. Static SSWS API tokens are
+deliberately not supported. An SSWS token carries no scopes at all and inherits the full
+privileges of whoever created it, which means it cannot express the boundary this module
+exists to enforce. A scoped OAuth grant can: if the airlock were bypassed entirely, a read
+scoped token still could not deactivate anybody.
+
+TRUST SURFACE: credentials resolve through the Station vault only, never from a file on
+disk. Network egress is allowlisted to the configured Okta org. No subprocess. No
+filesystem writes. Secrets are redacted from every returned envelope and every error.
