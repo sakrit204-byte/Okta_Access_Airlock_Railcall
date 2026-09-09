@@ -16,3 +16,6 @@ secrets/
 .idea/
 .DS_Store
 Thumbs.db
+
+.secrets/
+live_findings*.json
