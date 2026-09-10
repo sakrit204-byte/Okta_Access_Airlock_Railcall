@@ -1,10 +1,15 @@
 name: ci
 
-# Three gates, because passing one says nothing about the others. The offline
-# suite proves behaviour, station_check proves the bundle will actually load and
-# run inside RailCall, and lint_listing proves the marketplace will accept it.
-# The parity check is the one that catches drift between the manifest and the
-# words in the listing, which is the most common cosmetic rejection.
+# Five gates, because passing one says nothing about the others. Two of these
+# were added after a gate we already had let a real defect through: the listing
+# gate accepted a manifest the station could not load, and the station loaded a
+# handler the listing gate rejected.
+#
+#   offline suite   behaviour, against recorded responses
+#   station_check   the bundle actually loads and runs inside RailCall
+#   check_parity    manifest, handler, listing and README all agree
+#   lint_listing    the marketplace will accept the module
+#   check_workflow  the marketplace will accept the workflow
 
 on:
   push:

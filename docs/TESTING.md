@@ -68,10 +68,16 @@ What it constrains, stated plainly:
 
 ### Status
 
-Authentication proven end to end against a live org. Command level probing is blocked
-on scope grants in the Okta console, which is configuration rather than code.
+**All 36 commands have been run against a live Okta org.** All 9 writes were exercised
+against a disposable user and group created for the purpose and removed afterwards. Four
+defects were found by that run and are recorded in the log below, along with the two
+things about Okta that only a live run could have told us.
 
-### What will be recorded per command
+The org's own account was never used as a write subject. `apply.offboard_user` against
+the only account in an org locks its owner out of it, which is a thing to know rather
+than a thing to demonstrate.
+
+### What is recorded per command
 
 * The command, the scopes it needed, and whether it worked.
 * Anything the provider did that the documentation did not predict, with enough detail
@@ -81,7 +87,7 @@ on scope grants in the Okta console, which is configuration rather than code.
 
 ### Log
 
-**2026 09 10 — DPoP is mandatory on the token endpoint.**
+**2026 09 10 · DPoP is mandatory on the token endpoint.**
 
 The first live run against `integrator-6383370.okta.com` was refused before any command
 ran:
@@ -111,7 +117,7 @@ Notes from implementing it:
 * A resource request can be challenged for a new nonce at any time, not only on the
   first call, so the same single retry exists on the API path.
 
-**2026 09 10 — client assertions are single use.**
+**2026 09 10 · client assertions are single use.**
 
 Once DPoP was working, the nonce retry failed:
 
@@ -127,7 +133,7 @@ just a fresh proof. This is easy to get wrong precisely because the retry is int
 and invisible, and it would appear as an intermittent authentication failure under any
 condition that triggers a second attempt.
 
-**2026 09 10 — authentication confirmed working.**
+**2026 09 10 · authentication confirmed working.**
 
 With both fixed, Okta's answer became purely a configuration one:
 
@@ -142,7 +148,7 @@ correct behaviour to see from an application with a valid identity and no permis
 and it confirms the whole auth path: assertion signing, DPoP proof, nonce handshake and
 egress allowlist.
 
-**2026 09 10 — first full probe, with all five read scopes granted.**
+**2026 09 10 · first full probe, with all five read scopes granted.**
 
 Scopes confirmed granted and working: `okta.apps.read`, `okta.groups.read`,
 `okta.logs.read`, `okta.roles.read`, `okta.users.read`.
@@ -183,7 +189,7 @@ permission to perform the requested action":
 /iam/resource-sets
 ```
 
-The Read-only Administrator role assigned to the application is not permitted to read
+The Read only Administrator role assigned to the application is not permitted to read
 admin role assignments. Granting more OAuth scope does not fix it; it needs a more
 privileged admin role, which is a trade against the least privilege posture this module
 argues for. Commands now degrade rather than fail: `users.list_access` and
@@ -221,3 +227,81 @@ Worth recording what the blast radius command found on a **one user, freshly cre
 org**: two OAuth refresh tokens that survive a deactivation, and one group membership
 that survives it. On an org that has done nothing. That is the argument for the command
 existing, made by the org itself rather than by us.
+
+***
+
+**2026 09 10 · every write exercised, and a scope turns out to be half a permission.**
+
+All nine writes ran against a disposable user and group. The first result was that every
+one of them returned **403 while both write scopes were granted**, because the admin role
+assigned to the application was Read only Administrator.
+
+An OAuth scope and an Okta admin role are independent gates and both must permit a write.
+`org.verify_connection` was reporting the scopes as granted, which would have told a buyer
+their writes work right up until the first one failed.
+
+It now probes the role directly, by sending a deliberately invalid write and reading the
+status: **403 means the role refuses writes, 400 means it permits them** and only the body
+was bad. Nothing is created either way. It reported `usable: false` across all nine until
+the role was changed, then flipped to true. That is this module's own argument about
+layered permissions, demonstrated by Okta against itself.
+
+**`apply.unlock_user` reported `failed`, and that was correct.** The user was not locked,
+Okta refused, and the three outcome model recorded a definite refusal rather than a
+comfortable success.
+
+**Defect found: membership reads lag membership writes.** A PUT returns 204 and a GET
+issued immediately still reports the old set. One second later it is correct. The apply
+path read once and compared against the approved fingerprint, so a change made moments
+before the apply was invisible to it. The comparison matched, the write proceeded, and the
+approval looked like it had held while the thing it was pinned to had already moved. The
+guarantee held everywhere except the case it exists for.
+
+Applies that pin to a membership now read twice with a pause and refuse a set still moving
+as `membership_unsettled`. That narrows the window and does not close it, because Okta
+publishes no convergence bound, and `LIMITATIONS.md` says exactly that rather than
+implying a guarantee.
+
+**Defect found: the guard turned deliberate refusals into crashes.** Every exception was
+being wrapped as `unexpected_error`, including the refusals this module raises on purpose.
+A drift refusal reached the caller with the wrong code and none of its detail,
+indistinguishable from a crash, which is the worst possible outcome for the one message a
+reader most needs to trust. Found by reading the output of a live drift test rather than
+its exit status. Refusals now pass through unchanged and only genuine crashes are wrapped.
+
+**Verified after both fixes:** a plan approved over one member, an intruder added to the
+group, and the apply refuses with `plan_drifted`, naming both fingerprints and the user id
+that appeared.
+
+***
+
+**2026 09 10 · injection flagging, checked for false positives before being trusted.**
+
+Every read command was run against the live org with the `untrusted_content` scan active.
+**Zero false positives.**
+
+The first version flagged this module's own explanations, for being long or for quoting a
+URL. A signal that fires on its own author's text trains a reader to ignore it, which is
+worse than having no signal, so fields this module authors are excluded from the scan.
+
+**Defect found: the System Log cannot be paged with what Okta exposes.** It rejects a uuid
+as an `after` cursor, returning 400 `must be a valid value`, and it sends no `rel="next"`
+link even on a full page. The cursor fallback now applies only where records carry `id`,
+and custody commands report the watermark they actually reached instead of implying they
+read everything. Recorded as `LIMITATIONS.md` 17.
+
+**Defect found: the pager trusted the Link header alone and silently truncated.** Okta
+omits `rel="next"` in cases where more records exist. Silent truncation in a review tool
+is the failure that looks like success. Fixed, and covered by the offline suite.
+
+***
+
+**2026 09 10 · the five act demonstration, run end to end.**
+
+`tools/demo.py` runs against the live org, creates its own fixtures, and removes them.
+Exercised in one pass: `org.verify_connection`, `radius.user_deactivation`,
+`plan.group_membership`, `apply.group_membership` refusing on drift, `access.review_pack`,
+and `custody.detect_ungoverned`.
+
+The org was confirmed unchanged afterwards. The demo never prints a credential, and that
+is enforced in the code rather than left to care.

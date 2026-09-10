@@ -282,7 +282,7 @@ the log watermark every statement is bounded by. It will not report absence.
 ## Development
 
 ```
-python -m unittest discover tests    77 offline contract tests
+python -m unittest discover tests    89 offline contract tests
 python tools/station_check.py        the station's real loading contract
 python tools/check_parity.py         manifest, handler and listing agree
 python tools/lint_listing.py         the marketplace publish gate
@@ -298,11 +298,12 @@ load, and the station loaded a handler the listing gate rejected.
 
 ## Documentation
 
-* **`docs/LIMITATIONS.md`** — sixteen entries covering what this module cannot do and
-  why, most of them found by running it. Written as the build went, not at the end.
-* `docs/SETUP.md` — the Okta app in detail, including generating the key pair locally.
-* `docs/TESTING.md` — what has actually been run against a live org, including the two
-  defects that run exposed.
+* **`docs/LIMITATIONS.md`** holds eighteen entries covering what this module cannot do
+  and why, most of them found by running it. Written as the build went, not at the end.
+* `docs/SETUP.md` covers the Okta app in detail, including generating the key pair
+  locally.
+* `docs/TESTING.md` records what has actually been run against a live org, including the
+  five defects that run exposed.
 
 If you read one, read `LIMITATIONS.md`. It is the honest measure of this module.
 

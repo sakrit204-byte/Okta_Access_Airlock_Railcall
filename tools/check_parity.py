@@ -7,9 +7,99 @@ is exactly the kind of thing that rots. Nothing here is typed by a human.
 
 import json
 import pathlib
+import re
 import sys
+import unittest
 
 ROOT = pathlib.Path(__file__).resolve().parent.parent
+
+WORDS = {
+    1: "one", 2: "two", 3: "three", 4: "four", 5: "five", 6: "six", 7: "seven",
+    8: "eight", 9: "nine", 10: "ten", 11: "eleven", 12: "twelve", 13: "thirteen",
+    14: "fourteen", 15: "fifteen", 16: "sixteen", 17: "seventeen", 18: "eighteen",
+    19: "nineteen", 20: "twenty",
+}
+
+
+def _readme_counts(problems, commands, reads, writes):
+    """The README states counts in prose. Prose goes stale silently, so it is checked.
+
+    Every number here was wrong at least once during the build: the test count sat at
+    77 after the suite reached 85, and LIMITATIONS was cited as sixteen entries when it
+    held eighteen. A reviewer who checks one number and finds it wrong stops trusting
+    the rest, which is the whole cost of this file being out of date.
+    """
+    readme = (ROOT / "README.md").read_text(encoding="utf8")
+
+    limitations = (ROOT / "docs" / "LIMITATIONS.md").read_text(encoding="utf8")
+    entries = len(re.findall(r"^#{2,3}\s*\d+[\.\s]", limitations, re.M))
+    word = WORDS.get(entries, str(entries))
+    if ("%s entries" % word) not in readme and ("%d entries" % entries) not in readme:
+        problems.append(
+            "README does not say LIMITATIONS holds %d entries (expected \"%s entries\")"
+            % (entries, word)
+        )
+
+    loader = unittest.TestLoader()
+    suite = loader.discover(str(ROOT / "tests"))
+    if loader.errors:
+        problems.append("tests could not be counted: " + str(loader.errors[0])[:120])
+    else:
+        total = suite.countTestCases()
+        if ("%d offline contract tests" % total) not in readme:
+            problems.append(
+                "README states the wrong test count; the suite holds %d" % total
+            )
+
+    expected = "%d commands. %d read, %d write" % (
+        len(commands), len(reads), len(writes))
+    if expected.lower() not in readme.lower():
+        problems.append("README does not state the command split as \"%s\"" % expected)
+
+    testing = (ROOT / "docs" / "TESTING.md").read_text(encoding="utf8")
+    defects = len(re.findall(r"\*\*Defect found|and the probe caught it\.\*\*", testing))
+    word = WORDS.get(defects, str(defects))
+    if ("%s defects" % word) not in readme and ("%d defects" % defects) not in readme:
+        problems.append(
+            "README does not say the live run exposed %d defects (TESTING.md records %d)"
+            % (defects, defects)
+        )
+
+    workflow = json.loads(
+        (ROOT / "workflow" / "quarterly_access_review.json").read_text(encoding="utf8"))
+    nodes = len(workflow.get("nodes", []))
+    if ("%d nodes" % nodes) not in readme:
+        problems.append("README does not state the workflow as %d nodes" % nodes)
+
+
+# Built by code point so this file does not trip its own check.
+DASHES = (chr(0x2014), chr(0x2013))
+
+
+def _house_style(problems):
+    """No em dashes or en dashes anywhere in the bundle.
+
+    A house rule, not a marketplace one. It is here rather than in a style guide
+    because a rule nobody checks is a rule that lasts until the next hurried edit.
+    """
+    offenders = []
+    for path in sorted(ROOT.rglob("*")):
+        if not path.is_file() or path.suffix not in (".md", ".txt", ".py", ".json"):
+            continue
+        if ".git" in path.parts:
+            continue
+        try:
+            text = path.read_text(encoding="utf8")
+        except (UnicodeDecodeError, OSError):
+            continue
+        for number, line in enumerate(text.splitlines(), 1):
+            if DASHES[0] in line or DASHES[1] in line:
+                offenders.append("%s:%d" % (path.relative_to(ROOT).as_posix(), number))
+    if offenders:
+        problems.append(
+            "em or en dash in %d place(s): %s"
+            % (len(offenders), ", ".join(offenders[:6]))
+        )
 
 
 def main():
@@ -73,6 +163,9 @@ def main():
 
     if manifest.get("irreversible_effects") is None:
         problems.append("irreversible_effects is not declared")
+
+    _readme_counts(problems, commands, reads, writes)
+    _house_style(problems)
 
     print("commands :", len(commands), "=", len(reads), "read +", len(writes), "write")
     print("listing  :", len(listing.strip()), "characters")
