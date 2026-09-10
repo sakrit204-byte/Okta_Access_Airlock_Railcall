@@ -2,7 +2,7 @@
   "id": "sakrit204/okta_access_airlock",
   "name": "Okta Access Airlock",
   "manifest_version": 2,
-  "version": "0.7.0",
+  "version": "0.7.1",
   "provider": "okta",
   "category": "Identity",
   "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",
@@ -45,7 +45,6 @@
     {
       "id": "org.verify_connection",
       "title": "Verify connection",
-      "provider": "okta",
       "risk": "low",
       "mode": "read",
       "preview": true,
@@ -63,7 +62,6 @@
     {
       "id": "org.rate_budget",
       "title": "Rate limit headroom",
-      "provider": "okta",
       "risk": "low",
       "mode": "read",
       "preview": true,
@@ -81,7 +79,6 @@
     {
       "id": "users.find",
       "title": "Find users",
-      "provider": "okta",
       "risk": "low",
       "mode": "read",
       "preview": true,
@@ -124,7 +121,6 @@
     {
       "id": "users.get",
       "title": "Get one user",
-      "provider": "okta",
       "risk": "low",
       "mode": "read",
       "preview": true,
@@ -149,7 +145,6 @@
     {
       "id": "users.list_access",
       "title": "List a user's access",
-      "provider": "okta",
       "risk": "low",
       "mode": "read",
       "preview": true,
@@ -174,7 +169,6 @@
     {
       "id": "users.list_live_credentials",
       "title": "List live credentials",
-      "provider": "okta",
       "risk": "medium",
       "mode": "read",
       "preview": true,
@@ -199,7 +193,6 @@
     {
       "id": "groups.find",
       "title": "Find groups",
-      "provider": "okta",
       "risk": "low",
       "mode": "read",
       "preview": true,
@@ -236,7 +229,6 @@
     {
       "id": "groups.get_members",
       "title": "Get group members",
-      "provider": "okta",
       "risk": "low",
       "mode": "read",
       "preview": true,
@@ -267,7 +259,6 @@
     {
       "id": "access.rule_entanglement",
       "title": "Check rule entanglement",
-      "provider": "okta",
       "risk": "medium",
       "mode": "read",
       "preview": true,
@@ -298,7 +289,6 @@
     {
       "id": "access.explain",
       "title": "Explain access",
-      "provider": "okta",
       "risk": "low",
       "mode": "read",
       "preview": true,
@@ -329,7 +319,6 @@
     {
       "id": "radius.user_deactivation",
       "title": "Blast radius of a deactivation",
-      "provider": "okta",
       "risk": "medium",
       "mode": "read",
       "preview": true,
@@ -354,7 +343,6 @@
     {
       "id": "plan.group_membership",
       "title": "Plan a membership change",
-      "provider": "okta",
       "risk": "medium",
       "mode": "read",
       "preview": true,
@@ -391,7 +379,6 @@
     {
       "id": "plan.deactivate_user",
       "title": "Plan a deactivation",
-      "provider": "okta",
       "risk": "medium",
       "mode": "read",
       "preview": true,
@@ -416,7 +403,6 @@
     {
       "id": "custody.detect_ungoverned",
       "title": "Detect ungoverned changes",
-      "provider": "okta",
       "risk": "medium",
       "mode": "read",
       "preview": true,
@@ -447,7 +433,6 @@
     {
       "id": "custody.report",
       "title": "Custody report for one target",
-      "provider": "okta",
       "risk": "medium",
       "mode": "read",
       "preview": true,
@@ -484,7 +469,6 @@
     {
       "id": "apply.group_membership",
       "title": "Apply a membership change",
-      "provider": "okta",
       "risk": "high",
       "mode": "write_requires_approval",
       "preview": true,
@@ -521,7 +505,6 @@
     {
       "id": "apply.suspend_user",
       "title": "Suspend a user",
-      "provider": "okta",
       "risk": "medium",
       "mode": "write_requires_approval",
       "preview": true,
@@ -546,7 +529,6 @@
     {
       "id": "apply.unsuspend_user",
       "title": "Unsuspend a user",
-      "provider": "okta",
       "risk": "low",
       "mode": "write_requires_approval",
       "preview": true,
@@ -571,7 +553,6 @@
     {
       "id": "apply.unlock_user",
       "title": "Unlock a user",
-      "provider": "okta",
       "risk": "low",
       "mode": "write_requires_approval",
       "preview": true,
@@ -596,7 +577,6 @@
     {
       "id": "apply.deactivate_user",
       "title": "Deactivate a user",
-      "provider": "okta",
       "risk": "high",
       "mode": "write_requires_approval",
       "preview": true,
@@ -639,7 +619,6 @@
     {
       "id": "apply.revoke_live_credentials",
       "title": "Revoke live credentials",
-      "provider": "okta",
       "risk": "high",
       "mode": "write_requires_approval",
       "preview": true,
@@ -664,7 +643,6 @@
     {
       "id": "org.describe",
       "title": "Describe the org",
-      "provider": "okta",
       "risk": "low",
       "mode": "read",
       "preview": true,
@@ -695,7 +673,6 @@
     {
       "id": "access.review_pack",
       "title": "Access review pack",
-      "provider": "okta",
       "risk": "medium",
       "mode": "read",
       "preview": true,
@@ -732,7 +709,6 @@
     {
       "id": "radius.group_deletion",
       "title": "Blast radius of a group deletion",
-      "provider": "okta",
       "risk": "medium",
       "mode": "read",
       "preview": true,
@@ -757,7 +733,6 @@
     {
       "id": "custody.audit_pack",
       "title": "Audit evidence pack",
-      "provider": "okta",
       "risk": "medium",
       "mode": "read",
       "preview": true,
@@ -794,7 +769,6 @@
     {
       "id": "plan.reset_factors",
       "title": "Plan an MFA reset",
-      "provider": "okta",
       "risk": "high",
       "mode": "read",
       "preview": true,
@@ -819,7 +793,6 @@
     {
       "id": "plan.offboard_user",
       "title": "Plan a full offboarding",
-      "provider": "okta",
       "risk": "high",
       "mode": "read",
       "preview": true,

@@ -269,7 +269,42 @@ gates decides whether the module can be published.
 `tools/lint_listing.py` checks for a literal `def` locally so this is caught before a
 publish attempt rather than by spending one of the five per hour.
 
-## 13. Scope of the claim
+## 13. A manifest field that silently voided the plan and apply split
+
+**verified**
+
+The workflow engine addresses a module command by an `action_id`, derived in
+`routes/modules.py` as `provider + "_" + verb`, where `provider` is the command's own
+`provider` field if it declares one, and `verb` is whatever follows the first dot in the
+command id.
+
+Every command here declared `"provider": "okta"`, which looked tidy and was correct in
+the sense that this module does integrate with Okta. The consequence:
+
+```
+plan.deactivate_user   ->  okta_deactivate_user
+apply.deactivate_user  ->  okta_deactivate_user      same id
+plan.group_membership  ->  okta_group_membership
+apply.group_membership ->  okta_group_membership     same id
+users.find             ->  okta_find
+groups.find            ->  okta_find                 same id
+```
+
+**A plan and the apply it is supposed to gate resolved to the same action.** The entire
+safety pattern this module is built around would have been decorative inside a workflow,
+and nothing in the module's own behaviour would have looked wrong.
+
+The publish gate does not check this. The station's own collision guard would have
+caught it at load time, but only as a refusal to register, and only once somebody tried.
+
+**Fixed** by dropping the per command `provider` so the id derives from the command's own
+prefix, giving twenty seven distinct action ids. The module still declares
+`provider: okta` at the top level and in `credential_spec`, which is where it belongs.
+
+`tools/station_check.py` now computes every action id and fails on any collision, so this
+cannot come back.
+
+## 14. Scope of the claim
 
 This module produces evidence that a human reviews. It is a human in the loop record,
 not a certified compliance product, and it does not by itself satisfy any control in

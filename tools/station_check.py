@@ -104,7 +104,29 @@ def main():
             problems.append(cid + " requires undeclared credentials: " + ", ".join(unknown))
     print("  {} commands resolved to callables".format(len(manifest.get("commands") or [])))
 
-    # 3. fail closed: a failing command must raise, not return
+    # 3. workflow action ids must be unique
+    print()
+    print("== workflow action ids ==")
+    seen = {}
+    for command in manifest.get("commands") or []:
+        cid = command["id"]
+        parts = cid.split(".", 1)
+        # routes/modules.py _module_provider_verb
+        provider = command.get("provider") or (
+            parts[0] if len(parts) == 2 else manifest.get("id", "").split("/")[-1]
+        )
+        verb = (parts[1] if len(parts) == 2 else cid).replace(".", "_")
+        seen.setdefault(provider + "_" + verb, []).append(cid)
+    clashes = {a: ids for a, ids in seen.items() if len(ids) > 1}
+    print("  {} distinct action ids for {} commands".format(
+        len(seen), len(manifest.get("commands") or [])))
+    for action, ids in sorted(clashes.items()):
+        print("  CLASH", action, "<-", ", ".join(ids))
+        problems.append("action id collision on " + action + ": " + ", ".join(ids))
+    if not clashes:
+        print("  no collisions")
+
+    # 4. fail closed: a failing command must raise, not return
     print()
     print("== fail closed ==")
     probe = namespace.get("org_verify_connection")
@@ -117,7 +139,7 @@ def main():
         if "no credential wired" not in str(err) and "credential" not in str(err).lower():
             print("   message:", str(err)[:120])
 
-    # 4. optional live call through the same path the station uses
+    # 5. optional live call through the same path the station uses
     if args.live:
         print()
         print("== live call through the station contract ==")
