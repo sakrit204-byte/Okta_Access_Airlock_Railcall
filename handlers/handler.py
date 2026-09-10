@@ -1746,6 +1746,39 @@ def plan_deactivate_user(inputs, context):
 
 DORMANT_DAYS_DEFAULT = 90
 
+# Events that only an administrator performs. Used to tell a standing admin who
+# still does the job from one who merely still holds the role.
+ADMIN_ACTIVITY_EVENTS = (
+    "user.lifecycle.create",
+    "user.lifecycle.deactivate",
+    "user.lifecycle.suspend",
+    "user.lifecycle.unsuspend",
+    "user.lifecycle.delete",
+    "user.account.privilege.grant",
+    "user.account.privilege.revoke",
+    "user.account.update_profile",
+    "user.mfa.factor.reset_all",
+    "group.user_membership.add",
+    "group.user_membership.remove",
+    "group.lifecycle.create",
+    "group.lifecycle.delete",
+    "group.rule.lifecycle.create",
+    "group.rule.lifecycle.delete",
+    "application.lifecycle.create",
+    "application.lifecycle.update",
+    "application.lifecycle.delete",
+    "application.user_membership.add",
+    "application.user_membership.remove",
+    "policy.lifecycle.create",
+    "policy.lifecycle.update",
+    "policy.rule.add",
+    "policy.rule.update",
+    "system.api_token.create",
+)
+
+PRIVILEGE_GRANT = "user.account.privilege.grant"
+PRIVILEGE_REVOKE = "user.account.privilege.revoke"
+
 
 def _days_since(stamp):
     if not stamp:
@@ -2154,6 +2187,428 @@ def plan_offboard_user(inputs, context):
     )
 
 
+def _log_query(client, event_types, since=None, cap=500):
+    query = {
+        "limit": "100",
+        "sortOrder": "DESCENDING",
+        "filter": " or ".join('eventType eq "' + e + '"' for e in event_types),
+    }
+    if since:
+        query["since"] = str(since)
+    return _paged(client, "/logs", query, cap)
+
+
+@_guard("org.list_admins")
+def org_list_admins(inputs, context):
+    """Who holds administrative privilege, reconstructed from the System Log.
+
+    The obvious way to answer this is the roles API. On this org that answers 403
+    for a read only administrator, and the refusal is the admin role rather than
+    the OAuth scope, so more scope does not help.
+
+    The System Log records privilege grants and revocations with actor, target
+    and timestamp, so the standing set can be reconstructed by replaying them.
+    That is genuinely weaker than reading the roles API and this command says so:
+    it sees the retention window only, and a grant older than that window is
+    invisible. It is a floor, never a total.
+    """
+    client = _client()
+    page = _log_query(
+        client,
+        (PRIVILEGE_GRANT, PRIVILEGE_REVOKE),
+        inputs.get("since"),
+        _int(inputs.get("max_events"), 500),
+    )
+
+    # Oldest first, so a later revoke wins over an earlier grant.
+    events = list(reversed(page["items"]))
+    holders = {}
+    for event in events:
+        targets = event.get("target") or []
+        for target in targets:
+            if target.get("type") != "User":
+                continue
+            key = target.get("id")
+            if not key:
+                continue
+            record = holders.setdefault(
+                key,
+                {
+                    "user_id": key,
+                    "identifier": target.get("alternateId"),
+                    "name": target.get("displayName"),
+                    "holds_admin": False,
+                    "granted_at": None,
+                    "revoked_at": None,
+                    "granted_by": None,
+                },
+            )
+            actor = event.get("actor") or {}
+            if event.get("eventType") == PRIVILEGE_GRANT:
+                record["holds_admin"] = True
+                record["granted_at"] = event.get("published")
+                record["granted_by"] = actor.get("alternateId") or actor.get("type")
+                record["revoked_at"] = None
+            else:
+                record["holds_admin"] = False
+                record["revoked_at"] = event.get("published")
+
+    current = [h for h in holders.values() if h["holds_admin"]]
+    return _ok(
+        "org.list_admins",
+        {
+            "source": "system_log_replay",
+            "admins_visible": len(current),
+            "admins": current,
+            "revoked_in_window": [h for h in holders.values() if not h["holds_admin"]],
+            "events_replayed": page["count"],
+            "log_read_complete": page["complete"],
+            "is_a_floor_not_a_total": True,
+            "why_not_the_roles_api": (
+                "The roles API answers 403 for the admin role assigned to this "
+                "application. This is reconstructed from privilege grant and "
+                "revoke events instead, so it sees only the log retention window. "
+                "A grant older than that window does not appear here."
+            ),
+        },
+        [
+            "This is a floor, not a total. Treat a name appearing here as "
+            "certain, and its absence as unknown rather than as evidence."
+        ],
+    )
+
+
+@_guard("access.dormant_admins")
+def access_dormant_admins(inputs, context):
+    """Who holds admin and has not used it.
+
+    Standing privilege that nobody exercises is the finding an access review
+    exists to produce, and it cannot be exported from anywhere: it needs role
+    holders joined against administrative activity over time.
+    """
+    dormant_days = _int(inputs.get("dormant_days"), DORMANT_DAYS_DEFAULT)
+    admins = org_list_admins(
+        {"since": inputs.get("since"), "max_events": _int(inputs.get("max_events"), 500)},
+        context,
+    )
+    holders = (admins.get("data") or {}).get("admins") or []
+    if not holders:
+        return _ok(
+            "access.dormant_admins",
+            {
+                "dormant_threshold_days": dormant_days,
+                "admins_examined": 0,
+                "dormant": [],
+                "note": (
+                    "No administrative privilege grant was visible in the window "
+                    "read, so there is nothing to assess. That is not evidence "
+                    "that nobody holds admin."
+                ),
+            },
+            (admins.get("warnings") or None),
+        )
+
+    client = _client()
+    activity = _log_query(
+        client, ADMIN_ACTIVITY_EVENTS, inputs.get("since"),
+        _int(inputs.get("max_events"), 500),
+    )
+
+    last_seen = {}
+    for event in activity["items"]:
+        actor = event.get("actor") or {}
+        actor_id = actor.get("id")
+        if not actor_id:
+            continue
+        published = event.get("published")
+        if actor_id not in last_seen or (published or "") > last_seen[actor_id]["at"]:
+            last_seen[actor_id] = {"at": published, "event": event.get("eventType")}
+
+    rows = []
+    for holder in holders:
+        seen = last_seen.get(holder["user_id"])
+        age = _days_since(seen["at"]) if seen else None
+        rows.append(
+            {
+                "user_id": holder["user_id"],
+                "identifier": holder["identifier"],
+                "granted_at": holder["granted_at"],
+                "last_admin_action": seen["at"] if seen else None,
+                "last_admin_action_type": seen["event"] if seen else None,
+                "days_since_admin_action": age,
+                "dormant": seen is None or (age is not None and age >= dormant_days),
+                "never_observed_acting": seen is None,
+            }
+        )
+
+    dormant = [r for r in rows if r["dormant"]]
+    return _ok(
+        "access.dormant_admins",
+        {
+            "dormant_threshold_days": dormant_days,
+            "admins_examined": len(rows),
+            "dormant_count": len(dormant),
+            "dormant": dormant,
+            "all_admins": rows,
+            "log_read_complete": activity["complete"] and (admins.get("data") or {}).get("log_read_complete"),
+            "bound": (
+                "Both halves of this join come from the System Log, so an admin "
+                "who acted before the retention window looks dormant here. Read "
+                "never_observed_acting as unproven, not as proof of disuse."
+            ),
+        },
+        [
+            str(len(dormant))
+            + " administrators show no administrative action in the window read."
+        ]
+        if dormant
+        else None,
+    )
+
+
+@_guard("users.list_factors")
+def users_list_factors(inputs, context):
+    """A user's enrolled authenticators, which is what an MFA reset destroys."""
+    user_id = inputs.get("user_id")
+    if not user_id:
+        raise AirlockError("input_missing", "user_id is required.")
+    client = _client()
+    encoded = urllib.parse.quote(str(user_id))
+    factors = _paged_optional(client, "/users/" + encoded + "/factors")
+    active = [f for f in factors["items"] if f.get("status") == "ACTIVE"]
+    return _ok(
+        "users.list_factors",
+        {
+            "user_id": user_id,
+            "factors": [
+                {
+                    "id": f.get("id"),
+                    "type": f.get("factorType"),
+                    "provider": f.get("provider"),
+                    "status": f.get("status"),
+                    "created": f.get("created"),
+                }
+                for f in factors["items"]
+            ],
+            "active_count": len(active),
+            "available": factors["available"],
+            "reason": factors.get("reason"),
+            "single_factor_only": len(active) == 1,
+        },
+        ["This account has one active factor, so a reset leaves a password alone "
+         "reaching it until re enrolment."]
+        if len(active) == 1
+        else None,
+    )
+
+
+@_guard("groups.list_rules")
+def groups_list_rules(inputs, context):
+    """Every group rule, and which groups it assigns into.
+
+    A rule is standing automation that grants access without anybody approving
+    each grant, so a review that never looks at rules has not looked at how most
+    access is actually handed out.
+    """
+    client = _client()
+    rules = _paged_optional(
+        client, "/groups/rules", {"limit": "200"}, _int(inputs.get("max_rules"), 200)
+    )
+    if not rules["available"]:
+        return _ok(
+            "groups.list_rules",
+            {"available": False, "reason": rules.get("reason"), "rules": []},
+            ["Group rules could not be read: " + str(rules.get("reason"))],
+        )
+
+    rows = []
+    for rule in rules["items"]:
+        actions = (rule.get("actions") or {}).get("assignUserToGroups") or {}
+        conditions = (rule.get("conditions") or {}).get("expression") or {}
+        rows.append(
+            {
+                "id": rule.get("id"),
+                "name": rule.get("name"),
+                "status": rule.get("status"),
+                "assigns_into": actions.get("groupIds") or [],
+                "expression": conditions.get("value"),
+                "excluded_users": (
+                    ((rule.get("conditions") or {}).get("people") or {}).get("users") or {}
+                ).get("exclude")
+                or [],
+            }
+        )
+
+    with_exclusions = [r for r in rows if r["excluded_users"]]
+    return _ok(
+        "groups.list_rules",
+        {
+            "available": True,
+            "count": len(rows),
+            "complete": rules["complete"],
+            "active": sum(1 for r in rows if r["status"] == "ACTIVE"),
+            "rules": rows,
+            "rules_carrying_exclusions": len(with_exclusions),
+            "note": (
+                "An exclusion list is usually the residue of somebody being "
+                "removed from a rule managed group by hand, which Okta records "
+                "there permanently. Those entries are worth reading as history."
+            ),
+        },
+        None if rules["complete"] else ["Stopped at the rule cap; set is incomplete."],
+    )
+
+
+@_guard("plan.group_sync")
+def plan_group_sync(inputs, context):
+    """Plan a group reconciled to an exact member list."""
+    group_id = inputs.get("group_id")
+    target = inputs.get("target_member_ids")
+    if not group_id:
+        raise AirlockError("input_missing", "group_id is required.")
+    if not isinstance(target, list):
+        raise AirlockError(
+            "input_missing",
+            "target_member_ids must be a list, even an empty one. A sync with no "
+            "target is a request to empty the group, and that must be explicit.",
+        )
+
+    client = _client()
+    encoded = urllib.parse.quote(str(group_id))
+    group = _get_one(client, "/groups/" + encoded, "group_not_found")
+    members = _paged(client, "/groups/" + encoded + "/users", {"limit": "200"})
+    if not members["complete"]:
+        raise AirlockError(
+            "set_incomplete",
+            "The membership could not be read to completion, so a sync against it "
+            "would remove people this module never saw.",
+        )
+
+    current = sorted(u.get("id") for u in members["items"] if u.get("id"))
+    wanted = sorted(str(t) for t in target)
+    to_add = [u for u in wanted if u not in current]
+    to_remove = [u for u in current if u not in wanted]
+
+    warnings = []
+    if to_remove and not wanted:
+        warnings.append(
+            "This sync empties the group entirely, removing all "
+            + str(len(to_remove))
+            + " members."
+        )
+    elif len(to_remove) > len(current) / 2 and len(current) > 2:
+        warnings.append(
+            "This sync removes more than half the group, "
+            + str(len(to_remove))
+            + " of "
+            + str(len(current))
+            + " members. Check the target list is complete before approving."
+        )
+
+    entangled = []
+    for user_id in to_remove:
+        report = access_rule_entanglement({"user_id": user_id, "group_id": group_id}, context)
+        if report.get("status") == "ok" and report["data"].get("rule_managed"):
+            entangled.append({"user_id": user_id, "rules": report["data"].get("rules")})
+    if entangled:
+        warnings.append(
+            str(len(entangled))
+            + " of these removals would also permanently modify a group rule."
+        )
+
+    snapshot = {"group_id": group_id, "member_ids": current, "member_count": len(current)}
+    return _ok(
+        "plan.group_sync",
+        _plan_envelope(
+            "plan.group_sync",
+            "apply.group_sync",
+            {"group_id": group_id, "add": to_add, "remove": to_remove},
+            snapshot,
+            {
+                "group_name": (group.get("profile") or {}).get("name"),
+                "members_now": len(current),
+                "members_after": len(wanted),
+                "will_add": to_add,
+                "will_remove": to_remove,
+                "unchanged": [u for u in current if u in wanted],
+                "rule_entanglement": entangled,
+            },
+            warnings,
+        ),
+        warnings or None,
+    )
+
+
+@_guard("custody.reconcile_unresolved")
+def custody_reconcile_unresolved(inputs, context):
+    """Settle a write whose outcome nobody could determine.
+
+    An apply that gets no usable answer from Okta raises rather than guessing,
+    which leaves a real question open: did it land? This answers it from Okta's
+    own log plus a re read, so the question is settled by evidence rather than
+    by retrying and risking a doubled change.
+    """
+    target_id = inputs.get("target_id")
+    attempted_at = inputs.get("attempted_at")
+    expected = inputs.get("expected_event_type")
+    if not target_id or not attempted_at:
+        raise AirlockError(
+            "input_missing",
+            "target_id and attempted_at are both required. Take them from the "
+            "unresolved failure this is settling.",
+        )
+
+    creds = _vault_credentials()
+    client = OktaClient(creds)
+    our_client_id = creds.get("client_id")
+
+    types = (expected,) if expected else ACCESS_CHANGE_EVENTS
+    page = _log_query(client, types, attempted_at, _int(inputs.get("max_events"), 200))
+
+    matches = []
+    for event in page["items"]:
+        targets = event.get("target") or []
+        if any(t.get("id") == target_id for t in targets):
+            matches.append(_thin_event(event, our_client_id))
+
+    if matches:
+        verdict = "landed"
+        summary = (
+            "Okta's log records "
+            + str(len(matches))
+            + " matching change to this target after the attempt, so the write "
+            "landed. Do not retry."
+        )
+    elif not page["complete"]:
+        verdict = "still_unresolved"
+        summary = (
+            "The log could not be read to completion for this window, so absence "
+            "of a matching event proves nothing. Still unresolved."
+        )
+    else:
+        verdict = "not_visible"
+        summary = (
+            "No matching change is visible in the log after the attempt. Given "
+            "Okta publishes no maximum delivery latency, treat this as probably "
+            "not landed rather than certainly not landed, and re read the target "
+            "before retrying."
+        )
+
+    return _ok(
+        "custody.reconcile_unresolved",
+        {
+            "target_id": target_id,
+            "attempted_at": attempted_at,
+            "verdict": verdict,
+            "summary": summary,
+            "matching_events": matches,
+            "log_read_complete": page["complete"],
+            "safe_to_retry": verdict == "not_visible",
+        },
+        ["Do not retry: the write landed."] if verdict == "landed" else None,
+    )
+
+
 def _settle(client, method, path, body=None, prior=None):
     """Run one write and report which of three things happened.
 
@@ -2490,6 +2945,235 @@ def apply_revoke_live_credentials(inputs, context):
     )
 
 
+@_guard("apply.reset_factors")
+def apply_reset_factors(inputs, stamp):
+    """Reset a user's authenticators against an approved plan."""
+    user_id = inputs.get("user_id") or (inputs.get("intent") or {}).get("user_id")
+    if not user_id:
+        raise AirlockError("input_missing", "user_id is required.")
+
+    client = _client()
+    encoded = urllib.parse.quote(str(user_id))
+    user = _get_one(client, "/users/" + encoded, "user_not_found")
+    factors = _paged_optional(client, "/users/" + encoded + "/factors")
+
+    fresh = {
+        "user_id": user_id,
+        "status": user.get("status"),
+        "factor_ids": sorted(f.get("id") for f in factors["items"] if f.get("id")),
+        "factor_count": factors["count"],
+    }
+    drift = verify_plan(inputs, fresh)
+    if drift is not None:
+        raise _as_runtime(
+            _fail(
+                "apply.reset_factors",
+                "plan_drifted",
+                "This user's enrolled factors changed after the plan was "
+                "approved. Re plan and re approve, because the set being wiped "
+                "is not the set that was reviewed.",
+                drift,
+            )
+        )
+
+    outcome = _settle(
+        client,
+        "POST",
+        "/users/" + encoded + "/lifecycle/reset_factors",
+        prior={"factor_ids": fresh["factor_ids"]},
+    )
+    outcome.update({"user_id": user_id, "action": "reset_factors"})
+
+    return _apply_result(
+        "apply.reset_factors",
+        {"user_id": user_id, "action": "reset_factors"},
+        [outcome],
+        {
+            "factors_removed": fresh["factor_count"],
+            "reversibility": (
+                "Not reversible. The enrolments are gone and the user must enrol "
+                "again. Until they do, a password alone reaches this account."
+            ),
+        },
+    )
+
+
+@_guard("apply.group_sync")
+def apply_group_sync(inputs, stamp):
+    """Reconcile a group to an approved member list, refusing if it moved."""
+    fingerprint = inputs.get("fingerprint")
+    intent = inputs.get("intent") or {}
+    group_id = intent.get("group_id") or inputs.get("group_id")
+    if not fingerprint:
+        raise AirlockError(
+            "plan_missing", "Run plan.group_sync first and pass its fingerprint."
+        )
+    if not group_id:
+        raise AirlockError("input_missing", "The approved intent carries no group_id.")
+
+    client = _client()
+    encoded = urllib.parse.quote(str(group_id))
+    members = _paged(client, "/groups/" + encoded + "/users", {"limit": "200"})
+    if not members["complete"]:
+        raise AirlockError(
+            "set_incomplete",
+            "The membership could not be read to completion, so the approved "
+            "fingerprint cannot be checked against it.",
+        )
+
+    current = sorted(u.get("id") for u in members["items"] if u.get("id"))
+    fresh = {"group_id": group_id, "member_ids": current, "member_count": len(current)}
+    drift = verify_plan(inputs, fresh)
+    if drift is not None:
+        raise _as_runtime(
+            _fail(
+                "apply.group_sync",
+                "plan_drifted",
+                "The group changed after this sync was approved. Re plan and re "
+                "approve, because a sync applied to a moved group removes people "
+                "nobody reviewed.",
+                drift,
+            )
+        )
+
+    results = []
+    for user_id in intent.get("remove") or []:
+        path = "/groups/" + encoded + "/users/" + urllib.parse.quote(str(user_id))
+        outcome = _settle(client, "DELETE", path, prior={"was_member": True})
+        outcome.update({"user_id": user_id, "action": "remove"})
+        results.append(outcome)
+    for user_id in intent.get("add") or []:
+        path = "/groups/" + encoded + "/users/" + urllib.parse.quote(str(user_id))
+        outcome = _settle(client, "PUT", path, prior={"was_member": False})
+        outcome.update({"user_id": user_id, "action": "add"})
+        results.append(outcome)
+
+    if not results:
+        raise AirlockError(
+            "nothing_to_do", "The group already matches the approved target list."
+        )
+
+    return _apply_result(
+        "apply.group_sync",
+        intent,
+        results,
+        {"approved_fingerprint": fingerprint, "members_before": len(current)},
+    )
+
+
+@_guard("apply.offboard_user")
+def apply_offboard_user(inputs, stamp):
+    """Run the three offboarding stages in order, reporting each separately.
+
+    Ordered so nothing undoes a previous stage: revoke live credentials, then
+    remove memberships, then deactivate. Deactivation last, because it clears
+    none of the others and doing it first would only make the rest look done.
+
+    Every stage reports its own outcome. One flag across three stages would hide
+    a partial result, and a partial result here means somebody keeps access
+    nobody thinks they have.
+    """
+    fingerprint = inputs.get("fingerprint")
+    intent = inputs.get("intent") or {}
+    user_id = intent.get("user_id") or inputs.get("user_id")
+    if not fingerprint:
+        raise AirlockError(
+            "plan_missing", "Run plan.offboard_user first and pass its fingerprint."
+        )
+    if not user_id:
+        raise AirlockError("input_missing", "The approved intent carries no user_id.")
+
+    client = _client()
+    encoded = urllib.parse.quote(str(user_id))
+    user = _get_one(client, "/users/" + encoded, "user_not_found")
+    groups = _paged(client, "/users/" + encoded + "/groups", {"limit": "200"})
+    if not groups["complete"]:
+        raise AirlockError(
+            "set_incomplete",
+            "Memberships could not be read to completion, so the approved "
+            "fingerprint cannot be checked against them.",
+        )
+
+    live = users_list_live_credentials({"user_id": user_id}, stamp)
+    live_data = live.get("data") or {}
+    fresh = {
+        "user_id": user_id,
+        "status": user.get("status"),
+        "group_ids": sorted(g.get("id") for g in groups["items"] if g.get("id")),
+        "application_count": _paged(client, "/users/" + encoded + "/appLinks")["count"],
+        "refresh_tokens": (live_data.get("counts") or {}).get("refresh_tokens"),
+    }
+    drift = verify_plan(inputs, fresh)
+    if drift is not None:
+        raise _as_runtime(
+            _fail(
+                "apply.offboard_user",
+                "plan_drifted",
+                "This user's access changed after the offboarding was approved. "
+                "Re plan and re approve.",
+                drift,
+            )
+        )
+
+    results = []
+
+    sessions = _settle(client, "DELETE", "/users/" + encoded + "/sessions")
+    sessions.update({"stage": 1, "target": "sessions"})
+    results.append(sessions)
+
+    grants = _settle(client, "DELETE", "/users/" + encoded + "/grants")
+    grants.update({"stage": 1, "target": "oauth_grants"})
+    results.append(grants)
+
+    for token in live_data.get("refresh_tokens") or []:
+        client_id = token.get("client_id")
+        if not client_id:
+            continue
+        path = (
+            "/users/" + encoded + "/clients/"
+            + urllib.parse.quote(str(client_id)) + "/tokens"
+        )
+        outcome = _settle(client, "DELETE", path)
+        outcome.update({"stage": 1, "target": "refresh_tokens", "client_id": client_id})
+        results.append(outcome)
+
+    for group_id in fresh["group_ids"]:
+        path = (
+            "/groups/" + urllib.parse.quote(str(group_id)) + "/users/" + encoded
+        )
+        outcome = _settle(client, "DELETE", path, prior={"was_member": True})
+        outcome.update({"stage": 2, "target": "group_membership", "group_id": group_id})
+        results.append(outcome)
+
+    deactivate = _settle(
+        client,
+        "POST",
+        "/users/" + encoded + "/lifecycle/deactivate",
+        prior={"status": fresh["status"]},
+    )
+    deactivate.update({"stage": 3, "target": "user_status"})
+    results.append(deactivate)
+
+    return _apply_result(
+        "apply.offboard_user",
+        intent,
+        results,
+        {
+            "approved_fingerprint": fingerprint,
+            "stages": {
+                "1": "revoke live credentials",
+                "2": "remove group memberships",
+                "3": "deactivate",
+            },
+            "note": (
+                "Removing a rule managed membership at stage 2 also adds this "
+                "user to that rule's exception list permanently. The plan named "
+                "which removals do that."
+            ),
+        },
+    )
+
+
 # Events that change who can reach what. Anything not in here is noise for the
 # purposes of custody: sign ins, policy evaluations, session lifecycle.
 ACCESS_CHANGE_EVENTS = (
@@ -2759,27 +3443,36 @@ def custody_report(inputs, context):
 _h_org_verify_connection = org_verify_connection
 _h_org_rate_budget = org_rate_budget
 _h_org_describe = org_describe
+_h_org_list_admins = org_list_admins
 _h_users_find = users_find
 _h_users_get = users_get
 _h_users_list_access = users_list_access
 _h_users_list_live_credentials = users_list_live_credentials
+_h_users_list_factors = users_list_factors
 _h_groups_find = groups_find
 _h_groups_get_members = groups_get_members
+_h_groups_list_rules = groups_list_rules
 _h_access_rule_entanglement = access_rule_entanglement
 _h_access_explain = access_explain
 _h_access_review_pack = access_review_pack
+_h_access_dormant_admins = access_dormant_admins
 _h_radius_user_deactivation = radius_user_deactivation
 _h_radius_group_deletion = radius_group_deletion
 _h_plan_group_membership = plan_group_membership
 _h_plan_deactivate_user = plan_deactivate_user
 _h_plan_reset_factors = plan_reset_factors
 _h_plan_offboard_user = plan_offboard_user
+_h_plan_group_sync = plan_group_sync
 _h_custody_detect_ungoverned = custody_detect_ungoverned
 _h_custody_report = custody_report
 _h_custody_audit_pack = custody_audit_pack
+_h_custody_reconcile_unresolved = custody_reconcile_unresolved
 _h_apply_group_membership = apply_group_membership
 _h_apply_suspend_user = apply_suspend_user
 _h_apply_unsuspend_user = apply_unsuspend_user
 _h_apply_unlock_user = apply_unlock_user
 _h_apply_deactivate_user = apply_deactivate_user
 _h_apply_revoke_live_credentials = apply_revoke_live_credentials
+_h_apply_reset_factors = apply_reset_factors
+_h_apply_group_sync = apply_group_sync
+_h_apply_offboard_user = apply_offboard_user

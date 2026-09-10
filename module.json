@@ -2,7 +2,7 @@
   "id": "sakrit204/okta_access_airlock",
   "name": "Okta Access Airlock",
   "manifest_version": 2,
-  "version": "0.8.0",
+  "version": "1.0.0",
   "provider": "okta",
   "category": "Identity",
   "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",
@@ -812,6 +812,312 @@
           "required": true,
           "label": "User id",
           "help": "Okta user id."
+        }
+      }
+    },
+    {
+      "id": "org.list_admins",
+      "title": "List administrators",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Who holds administrative privilege, reconstructed by replaying privilege grant and revoke events from the System Log. Used because the roles API answers 403 for a read only administrator. Reports itself as a floor rather than a total: a grant older than the log retention window does not appear.",
+      "side_effects": "none",
+      "input_schema": {
+        "since": {
+          "type": "string",
+          "required": false,
+          "label": "Since",
+          "help": "ISO timestamp."
+        },
+        "max_events": {
+          "type": "number",
+          "required": false,
+          "default": 500,
+          "help": "Log events to examine."
+        }
+      }
+    },
+    {
+      "id": "access.dormant_admins",
+      "title": "Dormant administrators",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Who holds administrative privilege and has performed no administrative action in the window. Standing privilege nobody exercises is the finding an access review exists to produce, and it cannot be exported from anywhere because it needs role holders joined against activity over time.",
+      "side_effects": "none",
+      "input_schema": {
+        "since": {
+          "type": "string",
+          "required": false,
+          "label": "Since",
+          "help": "ISO timestamp."
+        },
+        "max_events": {
+          "type": "number",
+          "required": false,
+          "default": 500,
+          "help": "Log events to examine."
+        },
+        "dormant_days": {
+          "type": "number",
+          "required": false,
+          "default": 90,
+          "help": "Days without an administrative action before a standing admin counts as dormant."
+        }
+      }
+    },
+    {
+      "id": "users.list_factors",
+      "title": "List enrolled factors",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "A user's enrolled authenticators, which is exactly what an MFA reset destroys. Flags an account holding a single active factor, because resetting that leaves a password alone reaching the account until re enrolment.",
+      "side_effects": "none",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "Okta user id."
+        }
+      }
+    },
+    {
+      "id": "groups.list_rules",
+      "title": "List group rules",
+      "risk": "low",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Every group rule and which groups it assigns into, with its exclusion list. A rule grants access without anybody approving each grant, so a review that never looks at rules has not looked at how most access is handed out.",
+      "side_effects": "none",
+      "input_schema": {
+        "max_rules": {
+          "type": "number",
+          "required": false,
+          "default": 200,
+          "help": "Cap the rules read."
+        }
+      }
+    },
+    {
+      "id": "plan.group_sync",
+      "title": "Plan a group sync",
+      "risk": "high",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Plan a group reconciled to an exact member list. Refuses when the membership cannot be read to completion, because a sync against a partial read removes people this module never saw. Warns loudly when a sync empties a group or removes more than half of it.",
+      "side_effects": "none",
+      "input_schema": {
+        "group_id": {
+          "type": "string",
+          "required": true,
+          "label": "Group id",
+          "help": "The group to reconcile."
+        },
+        "target_member_ids": {
+          "type": "object",
+          "required": true,
+          "label": "Target members",
+          "help": "The exact list the group should contain. An empty list means empty the group, and must be given explicitly."
+        }
+      }
+    },
+    {
+      "id": "custody.reconcile_unresolved",
+      "title": "Settle an unresolved write",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Settle a write whose outcome nobody could determine, using Okta's own log rather than a retry. An apply that gets no usable answer raises rather than guessing, which leaves a real question open; this answers it from evidence, so a retry never doubles a change that already landed.",
+      "side_effects": "none",
+      "input_schema": {
+        "target_id": {
+          "type": "string",
+          "required": true,
+          "label": "Target id",
+          "help": "The user or group the write was aimed at."
+        },
+        "attempted_at": {
+          "type": "string",
+          "required": true,
+          "label": "Attempted at",
+          "help": "ISO timestamp from the unresolved failure."
+        },
+        "expected_event_type": {
+          "type": "string",
+          "required": false,
+          "label": "Expected event",
+          "help": "Narrow the search to one Okta event type."
+        },
+        "max_events": {
+          "type": "number",
+          "required": false,
+          "default": 200,
+          "help": "Log events to examine."
+        }
+      }
+    },
+    {
+      "id": "apply.reset_factors",
+      "title": "Reset enrolled factors",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Reset a user's authenticators against an approved plan, refusing if the enrolled set changed since approval because the set being wiped would not be the set that was reviewed. Not reversible: the enrolments are gone and the user must enrol again.",
+      "side_effects": "external",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "Okta user id."
+        },
+        "fingerprint": {
+          "type": "string",
+          "required": true,
+          "label": "Approved fingerprint",
+          "help": "From the matching plan. The apply refuses if state moved."
+        },
+        "intent": {
+          "type": "object",
+          "required": true,
+          "label": "Approved intent",
+          "help": "The intent block from the matching plan."
+        },
+        "snapshot": {
+          "type": "object",
+          "required": false,
+          "label": "Approved snapshot",
+          "help": "Used to name what drifted."
+        }
+      }
+    },
+    {
+      "id": "apply.group_sync",
+      "title": "Apply a group sync",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Reconcile a group to an approved member list, refusing if the group moved after approval because a sync applied to a moved group removes people nobody reviewed. Each add and removal reports landed, failed or unresolved separately.",
+      "side_effects": "external",
+      "input_schema": {
+        "fingerprint": {
+          "type": "string",
+          "required": true,
+          "label": "Approved fingerprint",
+          "help": "From the matching plan. The apply refuses if state moved."
+        },
+        "intent": {
+          "type": "object",
+          "required": true,
+          "label": "Approved intent",
+          "help": "The intent block from the matching plan."
+        },
+        "snapshot": {
+          "type": "object",
+          "required": false,
+          "label": "Approved snapshot",
+          "help": "Used to name what drifted."
+        }
+      }
+    },
+    {
+      "id": "apply.offboard_user",
+      "title": "Offboard a user",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Run the three offboarding stages in order, reporting each separately: revoke live credentials, remove group memberships, then deactivate. Deactivation is last because it clears none of the others and doing it first would only make the rest look done.",
+      "side_effects": "external",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "Okta user id."
+        },
+        "fingerprint": {
+          "type": "string",
+          "required": true,
+          "label": "Approved fingerprint",
+          "help": "From the matching plan. The apply refuses if state moved."
+        },
+        "intent": {
+          "type": "object",
+          "required": true,
+          "label": "Approved intent",
+          "help": "The intent block from the matching plan."
+        },
+        "snapshot": {
+          "type": "object",
+          "required": false,
+          "label": "Approved snapshot",
+          "help": "Used to name what drifted."
         }
       }
     }
