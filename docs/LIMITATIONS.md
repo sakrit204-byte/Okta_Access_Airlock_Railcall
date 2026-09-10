@@ -249,7 +249,27 @@ change matters, the timeline shows the raw actor so a human can judge it.
 
 This is a real limit on the custody claim and it is stated rather than buried.
 
-## 12. Scope of the claim
+## 12. The station and the publish gate disagree about what a handler is
+
+**verified**
+
+The station resolves a command to its handler by **executing** the module and looking the
+function up in the resulting namespace, so a function built by a factory and assigned to
+a name works perfectly.
+
+The marketplace publish gate resolves it by **reading the source** for a matching `def`.
+A factory assigned handler is reported as missing and blocks the publish, even though the
+station would have run it without complaint.
+
+Four lifecycle commands here were originally generated from one shared builder, which is
+the natural way to write four functions that differ only in a path and some wording. They
+are now four literal `def`s that delegate to that builder, because only one of these two
+gates decides whether the module can be published.
+
+`tools/lint_listing.py` checks for a literal `def` locally so this is caught before a
+publish attempt rather than by spending one of the five per hour.
+
+## 13. Scope of the claim
 
 This module produces evidence that a human reviews. It is a human in the loop record,
 not a certified compliance product, and it does not by itself satisfy any control in

@@ -4,7 +4,7 @@ forty people of application access, or grant itself Super Administrator. Four or
 API calls, under a second, no preview and no way back. Which is why the honest answer to
 "should I connect an agent to my identity provider" has been no. This changes it.
 
-STATUS: in progress. 15 commands implemented and verified against the publish gate;
+STATUS: in progress. 21 commands implemented and verified against the publish gate;
 planned surface is 36. The count is generated from the manifest, never typed by hand.
 
 FOR: teams putting an agent near identity, and small teams carrying a compliance

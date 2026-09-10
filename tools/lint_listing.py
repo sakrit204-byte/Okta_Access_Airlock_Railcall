@@ -68,8 +68,14 @@ def local_checks(manifest, handler, description):
         if len(command.get("title") or "") < 3:
             problems.append(cid + " has no title of at least 3 characters")
         expected = cid.replace(".", "_").replace("-", "_")
-        if ("def " + expected) not in handler and (expected + " =") not in handler:
-            problems.append(cid + " has no function named " + expected)
+        # The gate reads the source for a literal `def`. A factory assigned
+        # function loads fine in the station and is still rejected here, so an
+        # assignment is not accepted as a match.
+        if ("def " + expected + "(") not in handler:
+            problems.append(
+                cid + " has no literal def named " + expected
+                + " (an assignment is not enough for the publish gate)"
+            )
         schema = command.get("input_schema")
         if schema is not None and not isinstance(schema, dict):
             problems.append(cid + " has an input_schema that is not an object")

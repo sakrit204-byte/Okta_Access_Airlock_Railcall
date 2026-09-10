@@ -2,7 +2,7 @@
   "id": "sakrit204/okta_access_airlock",
   "name": "Okta Access Airlock",
   "manifest_version": 2,
-  "version": "0.5.0",
+  "version": "0.6.0",
   "provider": "okta",
   "category": "Identity",
   "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",
@@ -478,6 +478,186 @@
           "required": false,
           "default": 500,
           "help": "Log events to examine."
+        }
+      }
+    },
+    {
+      "id": "apply.group_membership",
+      "title": "Apply a membership change",
+      "provider": "okta",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Apply an approved membership change. Re reads the group, re hashes it, and refuses if anything moved since the plan was approved. Each add and removal reports landed, failed or unresolved separately; an unresolved outcome raises rather than being receipted as a completed action.",
+      "side_effects": "external",
+      "input_schema": {
+        "fingerprint": {
+          "type": "string",
+          "required": true,
+          "label": "Approved fingerprint",
+          "help": "From the matching plan command. The apply refuses if state moved since."
+        },
+        "intent": {
+          "type": "object",
+          "required": true,
+          "label": "Approved intent",
+          "help": "The intent block from the matching plan."
+        },
+        "snapshot": {
+          "type": "object",
+          "required": false,
+          "label": "Approved snapshot",
+          "help": "The snapshot from the plan, used to name what drifted."
+        }
+      }
+    },
+    {
+      "id": "apply.suspend_user",
+      "title": "Suspend a user",
+      "provider": "okta",
+      "risk": "medium",
+      "mode": "write_requires_approval",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Suspend a user. The reversible alternative to deactivation and the one this module recommends where a change may need undoing. Sessions are ended and are not restored.",
+      "side_effects": "external",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "Okta user id."
+        }
+      }
+    },
+    {
+      "id": "apply.unsuspend_user",
+      "title": "Unsuspend a user",
+      "provider": "okta",
+      "risk": "low",
+      "mode": "write_requires_approval",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Restore a suspended user to their previous state.",
+      "side_effects": "external",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "Okta user id."
+        }
+      }
+    },
+    {
+      "id": "apply.unlock_user",
+      "title": "Unlock a user",
+      "provider": "okta",
+      "risk": "low",
+      "mode": "write_requires_approval",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Clear a lockout. Low risk and does not change any access.",
+      "side_effects": "external",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "Okta user id."
+        }
+      }
+    },
+    {
+      "id": "apply.deactivate_user",
+      "title": "Deactivate a user",
+      "provider": "okta",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Deactivate a user against an approved plan, refusing if their access changed since. Group memberships are unaffected by deactivation and revoked sessions are not restored, so the result states what survived rather than implying an off switch.",
+      "side_effects": "external",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "Okta user id."
+        },
+        "fingerprint": {
+          "type": "string",
+          "required": true,
+          "label": "Approved fingerprint",
+          "help": "From the matching plan command. The apply refuses if state moved since."
+        },
+        "intent": {
+          "type": "object",
+          "required": true,
+          "label": "Approved intent",
+          "help": "The intent block from the matching plan."
+        },
+        "snapshot": {
+          "type": "object",
+          "required": false,
+          "label": "Approved snapshot",
+          "help": "The snapshot from the plan, used to name what drifted."
+        }
+      }
+    },
+    {
+      "id": "apply.revoke_live_credentials",
+      "title": "Revoke live credentials",
+      "provider": "okta",
+      "risk": "high",
+      "mode": "write_requires_approval",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Revoke sessions, OAuth grants and per client refresh tokens, reporting each separately rather than as one success flag. Okta cannot enumerate sessions, so the session result reports that the revocation was accepted, not how many it ended.",
+      "side_effects": "external",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "Okta user id."
         }
       }
     }

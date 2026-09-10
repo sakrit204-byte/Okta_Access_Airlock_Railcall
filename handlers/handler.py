@@ -1744,6 +1744,342 @@ def plan_deactivate_user(inputs, context):
     )
 
 
+def _settle(client, method, path, body=None, prior=None):
+    """Run one write and report which of three things happened.
+
+    landed      Okta confirmed it.
+    failed      Okta refused it, definitively, and nothing changed.
+    unresolved  No answer we can trust. The change may or may not have happened,
+                and saying either would be a guess.
+
+    The third state is the whole point. Collapsing it into failure invites a
+    retry that silently doubles a change; collapsing it into success hides one
+    that never happened.
+    """
+    try:
+        status, _headers, parsed = client.request(method, path, body=body)
+    except AirlockError as err:
+        if err.code in ("provider_timeout", "provider_unreachable"):
+            return {
+                "outcome": "unresolved",
+                "reason": err.message,
+                "prior_state": prior,
+                "recorded_at": _now_iso(),
+            }
+        raise
+
+    if status in (200, 201, 204):
+        return {"outcome": "landed", "http_status": status, "recorded_at": _now_iso()}
+    if status in (408, 429) or status >= 500:
+        # Okta may have applied the change before failing to tell us about it.
+        return {
+            "outcome": "unresolved",
+            "http_status": status,
+            "reason": _provider_message(parsed)
+            or "Okta returned a status that does not settle whether this applied.",
+            "prior_state": prior,
+            "recorded_at": _now_iso(),
+        }
+    return {
+        "outcome": "failed",
+        "http_status": status,
+        "reason": _provider_message(parsed) or "Okta refused the change.",
+        "recorded_at": _now_iso(),
+    }
+
+
+def _apply_result(command, intent, results, extra=None):
+    """Fold per target outcomes into one answer, without flattening the truth.
+
+    A command where every target landed returns normally. A command where some
+    target's outcome is UNKNOWN raises, because the station records a returned
+    dict as a completed action and an unknown outcome must never be receipted as
+    a completed one. Definite failures return, because "we asked and Okta said
+    no" is a settled fact worth recording alongside the changes that did land.
+    """
+    landed = [r for r in results if r["outcome"] == "landed"]
+    failed = [r for r in results if r["outcome"] == "failed"]
+    unresolved = [r for r in results if r["outcome"] == "unresolved"]
+
+    payload = {
+        "intent": intent,
+        "results": results,
+        "counts": {
+            "landed": len(landed),
+            "failed": len(failed),
+            "unresolved": len(unresolved),
+        },
+        "all_landed": not failed and not unresolved,
+        "applied_at": _now_iso(),
+    }
+    if extra:
+        payload.update(extra)
+
+    if unresolved:
+        raise _as_runtime(
+            _fail(
+                command,
+                "outcome_unresolved",
+                str(len(unresolved))
+                + " of "
+                + str(len(results))
+                + " changes have an outcome this module cannot determine. "
+                + str(len(landed))
+                + " landed. Settle the unresolved ones with custody.report "
+                "before retrying, or a retry may double a change that already "
+                "applied.",
+                payload,
+            )
+        )
+
+    warnings = None
+    if failed:
+        warnings = [
+            str(len(failed))
+            + " of "
+            + str(len(results))
+            + " changes were refused by Okta. "
+            + str(len(landed))
+            + " landed."
+        ]
+    return _ok(command, payload, warnings)
+
+
+@_guard("apply.group_membership")
+def apply_group_membership(inputs, context):
+    """Apply an approved membership change, refusing if the state moved."""
+    fingerprint = inputs.get("fingerprint")
+    intent = inputs.get("intent") or {}
+    group_id = intent.get("group_id") or inputs.get("group_id")
+    if not fingerprint:
+        raise AirlockError(
+            "plan_missing",
+            "Run plan.group_membership first and pass its fingerprint and intent.",
+        )
+    if not group_id:
+        raise AirlockError("input_missing", "The approved intent carries no group_id.")
+
+    client = _client()
+    encoded = urllib.parse.quote(str(group_id))
+    members = _paged(client, "/groups/" + encoded + "/users", {"limit": "200"})
+    if not members["complete"]:
+        raise AirlockError(
+            "set_incomplete",
+            "The group membership could not be read to completion, so the "
+            "approved fingerprint cannot be checked against it.",
+        )
+
+    member_ids = sorted(u.get("id") for u in members["items"] if u.get("id"))
+    fresh = {
+        "group_id": group_id,
+        "member_ids": member_ids,
+        "member_count": len(member_ids),
+    }
+
+    drift = verify_plan(inputs, fresh)
+    if drift is not None:
+        raise _as_runtime(
+            _fail(
+                "apply.group_membership",
+                "plan_drifted",
+                "The group changed after this plan was approved, so the approval "
+                "no longer describes what would happen. Re plan and re approve.",
+                drift,
+            )
+        )
+
+    results = []
+    for user_id in intent.get("remove") or []:
+        target = "/groups/" + encoded + "/users/" + urllib.parse.quote(str(user_id))
+        outcome = _settle(client, "DELETE", target, prior={"was_member": True})
+        outcome.update({"user_id": user_id, "action": "remove"})
+        results.append(outcome)
+    for user_id in intent.get("add") or []:
+        target = "/groups/" + encoded + "/users/" + urllib.parse.quote(str(user_id))
+        outcome = _settle(client, "PUT", target, prior={"was_member": False})
+        outcome.update({"user_id": user_id, "action": "add"})
+        results.append(outcome)
+
+    if not results:
+        raise AirlockError(
+            "nothing_to_do", "The approved intent contains no changes to apply."
+        )
+
+    return _apply_result(
+        "apply.group_membership",
+        intent,
+        results,
+        {"approved_fingerprint": fingerprint},
+    )
+
+
+def _lifecycle(command, action, path_suffix, reversible_note):
+    """Build one user lifecycle apply. They differ only in path and wording."""
+
+    def run(inputs, context):
+        user_id = inputs.get("user_id") or (inputs.get("intent") or {}).get("user_id")
+        if not user_id:
+            raise AirlockError("input_missing", "user_id is required.")
+        client = _client()
+        encoded = urllib.parse.quote(str(user_id))
+        before = _get_one(client, "/users/" + encoded, "user_not_found")
+        prior_status = before.get("status")
+
+        if action == "deactivate":
+            fresh = {
+                "user_id": user_id,
+                "status": prior_status,
+                "status_changed": before.get("statusChanged"),
+                "group_ids": sorted(
+                    g.get("id")
+                    for g in _paged(
+                        client, "/users/" + encoded + "/groups", {"limit": "200"}
+                    )["items"]
+                    if g.get("id")
+                ),
+                "application_count": _paged(
+                    client, "/users/" + encoded + "/appLinks"
+                )["count"],
+            }
+            drift = verify_plan(inputs, fresh)
+            if drift is not None:
+                raise _as_runtime(
+                    _fail(
+                        command,
+                        "plan_drifted",
+                        "This user changed after the plan was approved. Re plan "
+                        "and re approve.",
+                        drift,
+                    )
+                )
+
+        outcome = _settle(
+            client,
+            "POST",
+            "/users/" + encoded + "/lifecycle/" + path_suffix,
+            prior={"status": prior_status},
+        )
+        outcome.update({"user_id": user_id, "action": action})
+
+        return _apply_result(
+            command,
+            {"user_id": user_id, "action": action},
+            [outcome],
+            {
+                "status_before": prior_status,
+                "reversibility": reversible_note,
+            },
+        )
+
+    return _guard(command)(run)
+
+
+# Written as four literal defs rather than generated from _lifecycle in a loop.
+# The marketplace publish gate resolves a command to its handler by reading the
+# source for a matching `def`, so factory assigned functions are rejected as
+# missing even though the station loads them without complaint. The two gates do
+# not agree, and only one of them decides whether this can be published.
+
+def apply_suspend_user(inputs, stamp):
+    """Suspend a user. The reversible alternative, and the recommended one."""
+    return _lifecycle(
+        "apply.suspend_user",
+        "suspend",
+        "suspend",
+        "Reversible with apply.unsuspend_user. Sessions are ended and are not "
+        "restored.",
+    )(inputs, stamp)
+
+
+def apply_unsuspend_user(inputs, stamp):
+    """Restore a suspended user to their previous state."""
+    return _lifecycle(
+        "apply.unsuspend_user", "unsuspend", "unsuspend", "Restores the previous state."
+    )(inputs, stamp)
+
+
+def apply_unlock_user(inputs, stamp):
+    """Clear a lockout. Changes no access."""
+    return _lifecycle(
+        "apply.unlock_user", "unlock", "unlock", "Low risk. Clears a lockout only."
+    )(inputs, stamp)
+
+
+def apply_deactivate_user(inputs, stamp):
+    """Deactivate a user against an approved plan."""
+    return _lifecycle(
+        "apply.deactivate_user",
+        "deactivate",
+        "deactivate",
+        "Reactivation is possible, but group memberships are unaffected and any "
+        "revoked sessions and tokens are not restored. Prefer apply.suspend_user "
+        "where the change may need undoing.",
+    )(inputs, stamp)
+
+
+@_guard("apply.revoke_live_credentials")
+def apply_revoke_live_credentials(inputs, context):
+    """Revoke sessions, OAuth grants and refresh tokens, reporting each separately.
+
+    Okta exposes these as three different endpoints and deactivation clears none
+    of them reliably. Returning one success flag across three revocations would
+    hide a partial result, which here means someone keeps access nobody thinks
+    they have.
+    """
+    user_id = inputs.get("user_id") or (inputs.get("intent") or {}).get("user_id")
+    if not user_id:
+        raise AirlockError("input_missing", "user_id is required.")
+
+    client = _client()
+    encoded = urllib.parse.quote(str(user_id))
+    before = users_list_live_credentials({"user_id": user_id}, context)
+    counts = (before.get("data") or {}).get("counts") or {}
+
+    results = []
+    sessions = _settle(
+        client, "DELETE", "/users/" + encoded + "/sessions", prior={"enumerable": False}
+    )
+    sessions.update({"target": "sessions", "note": "Count unknown before or after; Okta cannot enumerate sessions."})
+    results.append(sessions)
+
+    grants = _settle(
+        client,
+        "DELETE",
+        "/users/" + encoded + "/grants",
+        prior={"count": counts.get("oauth_grants")},
+    )
+    grants.update({"target": "oauth_grants", "count_before": counts.get("oauth_grants")})
+    results.append(grants)
+
+    for token in (before.get("data") or {}).get("refresh_tokens") or []:
+        client_id = token.get("client_id")
+        if not client_id:
+            continue
+        path = (
+            "/users/"
+            + encoded
+            + "/clients/"
+            + urllib.parse.quote(str(client_id))
+            + "/tokens"
+        )
+        outcome = _settle(client, "DELETE", path, prior={"client_id": client_id})
+        outcome.update({"target": "refresh_tokens", "client_id": client_id})
+        results.append(outcome)
+
+    return _apply_result(
+        "apply.revoke_live_credentials",
+        {"user_id": user_id, "action": "revoke_live_credentials"},
+        results,
+        {
+            "counts_before": counts,
+            "note": (
+                "Sessions cannot be enumerated by Okta, so this reports that the "
+                "revocation was accepted, not how many sessions it ended."
+            ),
+        },
+    )
+
+
 # Events that change who can reach what. Anything not in here is noise for the
 # purposes of custody: sign ins, policy evaluations, session lifecycle.
 ACCESS_CHANGE_EVENTS = (
@@ -2025,3 +2361,9 @@ _h_plan_group_membership = plan_group_membership
 _h_plan_deactivate_user = plan_deactivate_user
 _h_custody_detect_ungoverned = custody_detect_ungoverned
 _h_custody_report = custody_report
+_h_apply_group_membership = apply_group_membership
+_h_apply_suspend_user = apply_suspend_user
+_h_apply_unsuspend_user = apply_unsuspend_user
+_h_apply_unlock_user = apply_unlock_user
+_h_apply_deactivate_user = apply_deactivate_user
+_h_apply_revoke_live_credentials = apply_revoke_live_credentials
