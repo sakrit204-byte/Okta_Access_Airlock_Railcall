@@ -255,7 +255,7 @@ verdict vocabulary keeps `system` separate from `governed` precisely so that a r
 can see the difference between "this module did it" and "Okta says it did it". Where a
 change matters, the timeline shows the raw actor so a human can judge it.
 
-This is a real limit on the custody claim and it is stated rather than buried.
+This is a real limit on the custody claim and it is stated, not buried.
 
 ## 12. The station and the publish gate disagree about what a handler is
 

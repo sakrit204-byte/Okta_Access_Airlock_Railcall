@@ -75,7 +75,7 @@ Per change, one of:
 
 * **governed**, bound to a specific approval
 * **ungoverned**, attributed to a named admin at a named time from a named IP address
-* **unproven**, which it reports as unproven rather than guessing
+* **unproven**, which it reports as unproven instead of guessing
 
 ### And it treats directory text as hostile
 
@@ -254,7 +254,7 @@ token still could not deactivate anybody.**
 it. That needs role holders joined against administrative activity over time, and it
 cannot be exported from anywhere. On this org tier the roles API refuses a read only
 administrator entirely, so both halves are reconstructed from the System Log, and the
-command says so rather than pretending to a completeness it does not have.
+command says so instead of pretending to a completeness it does not have.
 
 **There is deliberately no `apply.delete_user`.** Deletion is permanent, adds nothing
 over deactivation for access review, and shipping it would put the worst available

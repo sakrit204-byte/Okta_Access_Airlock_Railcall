@@ -4,8 +4,8 @@ forty people of application access, or grant itself Super Administrator. Four or
 API calls, under a second, no preview and no way back. Which is why the honest answer to
 "should I connect an agent to my identity provider" has been no. This changes it.
 
-STATUS: in progress. 36 commands implemented and verified against the publish gate;
-planned surface is 36. The count is generated from the manifest, never typed by hand.
+36 commands, 27 read and 9 write, every one run against a live Okta org. The count is
+generated from the manifest, never typed by hand.
 
 FOR: teams putting an agent near identity, and small teams carrying a compliance
 obligation without budget for Okta Identity Governance, an add on at roughly four to
@@ -24,8 +24,9 @@ which groups they own become ownerless, and how many live sessions and refresh t
 survive. There is no single off switch in Okta and this does not pretend there is.
 Dormant administrator detection: who holds standing admin with no administrative action
 in ninety days, which requires joining role assignments against System Log activity and
-cannot be exported from anywhere. A signed evidence chain that verifies offline months
-later and records every action refused, not only those performed.
+cannot be exported from anywhere. An evidence pack assembled entirely from Okta's own
+records, not from anything this module asserts about itself, carrying the log watermark
+every statement is bounded by.
 
 AUTHENTICATION: OAuth 2.0 service app using private_key_jwt. Static SSWS tokens are
 deliberately unsupported: they carry no scopes and inherit the full privileges of
