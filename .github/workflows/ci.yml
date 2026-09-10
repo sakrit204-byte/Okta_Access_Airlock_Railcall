@@ -1,0 +1,38 @@
+name: ci
+
+# Three gates, because passing one says nothing about the others. The offline
+# suite proves behaviour, station_check proves the bundle will actually load and
+# run inside RailCall, and lint_listing proves the marketplace will accept it.
+# The parity check is the one that catches drift between the manifest and the
+# words in the listing, which is the most common cosmetic rejection.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  gates:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the only runtime dependency
+        run: python -m pip install --quiet cryptography
+
+      - name: Offline contract suite
+        run: python -m unittest discover -s tests -v
+
+      - name: Station loading contract
+        run: python tools/station_check.py
+
+      - name: Manifest and description parity
+        run: python tools/check_parity.py
+
+      - name: Marketplace publish gate
+        run: python tools/lint_listing.py

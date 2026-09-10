@@ -2,10 +2,11 @@
   "id": "sakrit204/okta_access_airlock",
   "name": "Okta Access Airlock",
   "manifest_version": 2,
-  "version": "0.7.1",
+  "version": "0.8.0",
   "provider": "okta",
   "category": "Identity",
   "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",
+  "irreversible_effects": true,
   "credential_spec": {
     "provider": "okta",
     "category": "Identity",
