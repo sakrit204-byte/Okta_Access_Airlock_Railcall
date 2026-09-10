@@ -307,7 +307,7 @@ unexpected file is exactly what a list misses.
 
 ## Documentation
 
-* **`docs/LIMITATIONS.md`** holds eighteen entries covering what this module cannot do
+* **`docs/LIMITATIONS.md`** holds nineteen entries covering what this module cannot do
   and why, most of them found by running it. Written as the build went, not at the end.
 * `docs/SETUP.md` covers the Okta app in detail, including generating the key pair
   locally.

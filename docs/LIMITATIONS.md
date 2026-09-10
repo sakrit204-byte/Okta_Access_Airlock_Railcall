@@ -413,7 +413,24 @@ partial read is presented as covering a period. This is a real ceiling on how fa
 narrowing the window with `since` is the way to get a complete read of a shorter period
 rather than a partial read of a longer one.
 
-## 18. Scope of the claim
+## 18. Every command is approval gated by the station, including the reads
+
+Commands are declared with `mode: read` or a write mode, and the station upgrades that at
+registration. Because this module declares network access, **every one of its 36 commands
+registers as `write_requires_approval`**, the 27 reads included.
+
+Confirmed against a running station: all 36 register, all 36 wired, all 36 gated. It is
+not specific to this module. Every networked module on the platform behaves the same way,
+including RailCall's own reference set. Only modules that touch no network register any
+command as `read_only`.
+
+**Consequence.** "Read scopes alone are a sensible way to run this" remains true of the
+Okta side, and the OAuth scope and admin role still structurally prevent a read scoped
+token from writing. But it does not mean the reads run unattended. An operator wanting
+unattended reads should know that the gate sits above this module and is not something
+this module can waive, which is the correct place for it to sit.
+
+## 19. Scope of the claim
 
 This module produces evidence that a human reviews. It is a human in the loop record,
 not a certified compliance product, and it does not by itself satisfy any control in
