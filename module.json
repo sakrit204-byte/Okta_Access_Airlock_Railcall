@@ -6,6 +6,8 @@
   "provider": "okta",
   "category": "Identity",
   "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",
+  "homepage": "https://github.com/sakrit204-byte/Okta_Access_Airlock_Railcall",
+  "tests_url": "https://github.com/sakrit204-byte/Okta_Access_Airlock_Railcall/blob/main/tests/test_handler.py",
   "irreversible_effects": true,
   "credential_spec": {
     "provider": "okta",
