@@ -348,7 +348,64 @@ bug.
 Found by running a live drift test and reading the output rather than the exit status.
 The guard now re raises refusals unchanged and wraps only genuine crashes.
 
-## 16. Scope of the claim
+## 16. Directory text is written by strangers, and this module hands it to an agent
+
+**verified**
+
+Names, emails, group descriptions, application labels and System Log text are all set by
+people, and several of them by the very people a review is examining. Anybody who can
+edit their own profile can put an instruction in their display name.
+
+A module whose entire purpose is constraining what an agent does cannot then pipe
+unflagged attacker controlled text into that agent's context. That would be a hole in
+exactly the thing being sold.
+
+**What this module does.** Every response carries an `untrusted_content` block naming the
+source and listing any provider field whose text is shaped like an instruction: attempts
+to override earlier instructions, role hijacking, privilege requests, smuggled newlines
+or control characters, embedded URLs, and unusual length. The field path is given so a
+reader can go and look at it.
+
+**Nothing is rewritten or removed.** Silently altering directory data would be its own
+dishonesty, and a reader needs to see what is actually in the field to judge it. The
+finding is surfaced beside the data, not instead of it.
+
+**What this is not.** It is pattern matching, and pattern matching loses to a determined
+author. It raises the cost of a careless attack and gives a reviewer somewhere to look.
+It is not a filter and this module does not claim it stops anything. The real defences
+remain the ones that do not depend on reading text: the OAuth scope, the admin role, and
+a human approving every write.
+
+Fields this module writes itself are excluded from the scan. Flagging our own
+explanations for being long or quoting a URL would train a reader to ignore the signal,
+which is worse than not having one.
+
+## 17. The System Log cannot be paged
+
+**verified**
+
+Two separate limits, found together.
+
+The log returns **no `rel="next"` link even on a full page**. And the `after` cursor,
+which works on ordinary collections keyed by `id`, is rejected outright for log records,
+which carry a `uuid` instead:
+
+```
+GET /api/v1/logs?limit=2&after=<uuid>
+400  API validation failed: 'after': must be a valid value.
+```
+
+So the only lever is a bigger single page. Okta caps that at 1000 and refuses 1001, which
+this module now requests.
+
+**Consequence for custody.** Every custody command sees one page, not the whole log. A
+read that fills the page reports `log_read_complete: false`, and no verdict built on a
+partial read is presented as covering a period. This is a real ceiling on how far back
+`custody.detect_ungoverned` and `access.dormant_admins` can look in one call, and
+narrowing the window with `since` is the way to get a complete read of a shorter period
+rather than a partial read of a longer one.
+
+## 18. Scope of the claim
 
 This module produces evidence that a human reviews. It is a human in the loop record,
 not a certified compliance product, and it does not by itself satisfy any control in
