@@ -97,24 +97,40 @@ class OutcomeTests(unittest.TestCase):
         self.assertIn("prior_state", envelope)
         self.assertIn("recorded_at", envelope)
 
-    def test_guard_converts_unexpected_exceptions_into_closed_failures(self):
+    def test_a_failure_raises_so_the_station_receipt_is_honest(self):
+        """The station treats a returned dict as a successful action.
+
+        Returning a failure envelope would therefore have a failed operation
+        recorded as a success, which is the exact opposite of fail closed.
+        """
+
         @handler._guard("test.command")
-        def explode(inputs, context):
+        def explode(inputs, stamp):
             raise ValueError("a secret value should not appear here")
 
-        envelope = explode({}, {})
-        self.assertEqual(envelope["status"], "failed")
-        self.assertEqual(envelope["error"]["code"], "unexpected_error")
-        self.assertNotIn("secret value", json.dumps(envelope))
+        with self.assertRaises(RuntimeError) as caught:
+            explode({}, {})
+        self.assertIn("unexpected_error", str(caught.exception))
+        self.assertNotIn("secret value", str(caught.exception))
 
-    def test_guard_preserves_airlock_error_codes(self):
+    def test_a_raised_failure_still_carries_the_code_and_redacts(self):
         @handler._guard("test.command")
-        def refuse(inputs, context):
+        def refuse(inputs, stamp):
             raise handler.AirlockError("egress_blocked", "nope", {"private_key": "x"})
 
-        envelope = refuse({}, {})
-        self.assertEqual(envelope["error"]["code"], "egress_blocked")
-        self.assertEqual(envelope["error"]["detail"]["private_key"], handler.REDACTED)
+        with self.assertRaises(RuntimeError) as caught:
+            refuse({}, {})
+        message = str(caught.exception)
+        self.assertIn("egress_blocked", message)
+        self.assertIn(handler.REDACTED, message)
+        self.assertNotIn("x\"", message.replace(handler.REDACTED, ""))
+
+    def test_a_success_still_returns_a_dict(self):
+        @handler._guard("test.command")
+        def fine(inputs, stamp):
+            return handler._ok("test.command", {"value": 1})
+
+        self.assertEqual(fine({}, {})["status"], "ok")
 
 
 class CredentialTests(unittest.TestCase):
@@ -137,10 +153,28 @@ class CredentialTests(unittest.TestCase):
         finally:
             del handler.vault_get
 
-    def test_missing_required_field_names_the_field(self):
+    def test_missing_required_field_names_the_canonical_field(self):
         with self.assertRaises(handler.AirlockError) as caught:
             handler._require({"org_url": "https://a.okta.com"}, "client_id")
-        self.assertEqual(caught.exception.detail["missing_field"], "client_id")
+        self.assertEqual(caught.exception.detail["missing_field"], "OKTA_CLIENT_ID")
+
+    def test_the_credential_accepts_canonical_names_and_aliases(self):
+        canonical = handler._normalise_credential(
+            {"OKTA_ORG_URL": "https://a.okta.com", "OKTA_CLIENT_ID": "0oa"}
+        )
+        legacy = handler._normalise_credential(
+            {"org_url": "https://a.okta.com", "client_id": "0oa"}
+        )
+        self.assertEqual(canonical, legacy)
+        self.assertEqual(canonical["org_url"], "https://a.okta.com")
+
+    def test_the_vault_helper_is_read_from_the_injected_helpers(self):
+        handler.__rc_helpers__ = {"vault_get": lambda name: {"OKTA_ORG_URL": "https://a.okta.com"}}
+        try:
+            creds = handler._vault_credentials()
+            self.assertEqual(creds["org_url"], "https://a.okta.com")
+        finally:
+            del handler.__rc_helpers__
 
 
 class RateBudgetTests(unittest.TestCase):

@@ -183,7 +183,15 @@ def _vault_credentials():
     Reading a credentials file directly is a review failure and, more to the point,
     would put the private key somewhere this module does not control.
     """
-    resolver = globals().get("vault_get")
+    helpers = globals().get("__rc_helpers__")
+    resolver = None
+    if isinstance(helpers, dict):
+        resolver = helpers.get("vault_get")
+    if resolver is None:
+        # Only used by the offline suite, which injects a stub. The station
+        # always provides the helper, and reading a credentials file directly
+        # is never a fallback here.
+        resolver = globals().get("vault_get")
     if resolver is None:
         raise AirlockError(
             "vault_unavailable",
@@ -194,9 +202,34 @@ def _vault_credentials():
     if not isinstance(creds, dict) or not creds:
         raise AirlockError(
             "credential_missing",
-            "No okta credential found in the Station vault.",
+            "No okta credential found in the Station vault. Configure it in "
+            "Studio, Integrations, okta.",
         )
-    return creds
+    return _normalise_credential(creds)
+
+
+CREDENTIAL_ALIASES = {
+    "org_url": ("OKTA_ORG_URL", "org_url", "orgUrl"),
+    "client_id": ("OKTA_CLIENT_ID", "client_id", "clientId"),
+    "key_id": ("OKTA_KEY_ID", "key_id", "kid"),
+    "private_key": ("OKTA_PRIVATE_KEY", "private_key", "privateKey"),
+    "scopes": ("OKTA_SCOPES", "scopes"),
+}
+
+
+def _normalise_credential(creds):
+    """Accept the canonical credential_spec field names and their aliases.
+
+    The manifest declares OKTA_ORG_URL and friends, which is what Studio shows
+    a buyer. Lowercase forms are accepted so an existing entry keeps working.
+    """
+    out = {}
+    for canonical, names in CREDENTIAL_ALIASES.items():
+        for name in names:
+            if creds.get(name):
+                out[canonical] = creds[name]
+                break
+    return out
 
 
 def _require(creds, field):
@@ -204,8 +237,10 @@ def _require(creds, field):
     if not value:
         raise AirlockError(
             "credential_incomplete",
-            "The okta credential is missing the required field " + field + ".",
-            {"missing_field": field},
+            "The okta credential is missing "
+            + CREDENTIAL_ALIASES.get(field, (field,))[0]
+            + ".",
+            {"missing_field": CREDENTIAL_ALIASES.get(field, (field,))[0]},
         )
     return value
 
@@ -604,21 +639,45 @@ def _wants_new_nonce(status, parsed):
     return parsed.get("error") in ("use_dpop_nonce", "invalid_dpop_proof")
 
 
+def _as_runtime(envelope):
+    """Carry a structured failure out as the exception the station expects.
+
+    The station treats a returned dict as a successful action and writes a
+    receipt saying so. Returning a failure envelope would therefore record a
+    failed operation as a success, which is the exact opposite of the fail
+    closed behaviour this module claims. Raising is what makes the receipt
+    honest, so the structured detail rides in the message instead.
+    """
+    error = envelope.get("error") or {}
+    detail = error.get("detail") or {}
+    return RuntimeError(
+        envelope.get("command", "command")
+        + " -> "
+        + str(error.get("code"))
+        + ": "
+        + str(error.get("message"))
+        + (" | " + _canonical(detail) if detail else "")
+    )
+
+
 def _guard(command):
-    """Turn every uncaught condition into a fail closed envelope."""
+    """Fail closed. Success returns a dict; anything else raises."""
 
     def decorate(fn):
         def wrapped(inputs, context):
             try:
                 return fn(inputs or {}, context or {})
             except AirlockError as err:
-                return _fail(command, err.code, err.message, err.detail)
+                raise _as_runtime(_fail(command, err.code, err.message, err.detail))
             except Exception as err:  # noqa: BLE001
-                return _fail(
-                    command,
-                    "unexpected_error",
-                    "The command stopped rather than continue on an unknown state.",
-                    {"exception": type(err).__name__},
+                raise _as_runtime(
+                    _fail(
+                        command,
+                        "unexpected_error",
+                        "The command stopped rather than continue on an unknown "
+                        "state.",
+                        {"exception": type(err).__name__},
+                    )
                 )
 
         wrapped.__name__ = fn.__name__

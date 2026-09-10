@@ -1,14 +1,37 @@
 {
   "id": "sakrit204/okta_access_airlock",
-  "slug": "sakrit204/okta_access_airlock",
-  "version": "0.3.0",
+  "name": "Okta Access Airlock",
+  "manifest_version": 2,
+  "version": "0.4.0",
+  "provider": "okta",
+  "category": "Identity",
   "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",
-  "auth": {
-    "type": "oauth2",
+  "credential_spec": {
     "provider": "okta",
-    "vault_key": "okta"
+    "category": "Identity",
+    "name": "Okta (OAuth service app, private key JWT)",
+    "required": [
+      "OKTA_ORG_URL",
+      "OKTA_CLIENT_ID",
+      "OKTA_KEY_ID",
+      "OKTA_PRIVATE_KEY"
+    ],
+    "optional": [
+      "OKTA_SCOPES"
+    ],
+    "shape": "dict",
+    "risk": "high",
+    "read_write": "read"
   },
-  "license_required": false,
+  "allowed_destinations": [
+    {
+      "provider": "okta",
+      "hosts": [
+        "*.okta.com",
+        "*.oktapreview.com"
+      ]
+    }
+  ],
   "requires": {
     "network": [
       "*.okta.com",
@@ -17,10 +40,22 @@
     "subprocess": false,
     "filesystem_writes": []
   },
+  "license_required": false,
   "commands": [
     {
       "id": "org.verify_connection",
       "title": "Verify connection",
+      "provider": "okta",
+      "risk": "low",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "Probe every granted OAuth scope and name each missing one alongside the commands it blocks.",
       "side_effects": "none",
       "input_schema": {}
@@ -28,6 +63,17 @@
     {
       "id": "org.rate_budget",
       "title": "Rate limit headroom",
+      "provider": "okta",
+      "risk": "low",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "Report the remaining Okta rate limit headroom per endpoint bucket, so a bulk plan is never started that cannot finish.",
       "side_effects": "none",
       "input_schema": {}
@@ -35,6 +81,17 @@
     {
       "id": "users.find",
       "title": "Find users",
+      "provider": "okta",
+      "risk": "low",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "Find users by Okta filter expression. Results from filter may feed a write. Results from search are marked advisory and may not, because Okta serves search from an eventually consistent datasource.",
       "side_effects": "none",
       "input_schema": {
@@ -67,6 +124,17 @@
     {
       "id": "users.get",
       "title": "Get one user",
+      "provider": "okta",
+      "risk": "low",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "Profile, status and credential posture for a single user.",
       "side_effects": "none",
       "input_schema": {
@@ -81,6 +149,17 @@
     {
       "id": "users.list_access",
       "title": "List a user's access",
+      "provider": "okta",
+      "risk": "low",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "Groups, reachable applications and standing admin roles in one read. Application links are what the person can actually open, rather than what an assignment table implies.",
       "side_effects": "none",
       "input_schema": {
@@ -95,6 +174,17 @@
     {
       "id": "users.list_live_credentials",
       "title": "List live credentials",
+      "provider": "okta",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "OAuth grants, per client refresh tokens and enrolled devices, which are the things that survive a deactivation. Reports plainly that Okta exposes no way to enumerate active sessions.",
       "side_effects": "none",
       "input_schema": {
@@ -109,6 +199,17 @@
     {
       "id": "groups.find",
       "title": "Find groups",
+      "provider": "okta",
+      "risk": "low",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "Find groups by filter, paged to completion, reporting whether the set is complete.",
       "side_effects": "none",
       "input_schema": {
@@ -135,6 +236,17 @@
     {
       "id": "groups.get_members",
       "title": "Get group members",
+      "provider": "okta",
+      "risk": "low",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "Every member of one group, paged to completion so a set is never half reported.",
       "side_effects": "none",
       "input_schema": {
@@ -155,6 +267,17 @@
     {
       "id": "access.rule_entanglement",
       "title": "Check rule entanglement",
+      "provider": "okta",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "Report whether removing a membership would also permanently modify a group rule. Okta adds a manually removed user to the rule's exception list, which affects every other member the rule governs and cannot be undone without suspending the rule org wide.",
       "side_effects": "none",
       "input_schema": {
@@ -175,6 +298,17 @@
     {
       "id": "access.explain",
       "title": "Explain access",
+      "provider": "okta",
+      "risk": "low",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "Why can this user reach this application? Direct assignment, or through which group, or through which rule. The question an access review exists to answer.",
       "side_effects": "none",
       "input_schema": {
@@ -195,6 +329,17 @@
     {
       "id": "radius.user_deactivation",
       "title": "Blast radius of a deactivation",
+      "provider": "okta",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "What this user loses on deactivation, and more importantly what survives it: group memberships, OAuth grants and refresh tokens all persist, and active sessions cannot be enumerated at all. Also names any group left with no owner.",
       "side_effects": "none",
       "input_schema": {
@@ -209,6 +354,17 @@
     {
       "id": "plan.group_membership",
       "title": "Plan a membership change",
+      "provider": "okta",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "Compute a group membership change without applying it, snapshot and fingerprint the state it depends on, and name every removal that would also permanently modify a group rule. Refuses to plan against a membership it could not read to completion.",
       "side_effects": "none",
       "input_schema": {
@@ -235,6 +391,17 @@
     {
       "id": "plan.deactivate_user",
       "title": "Plan a deactivation",
+      "provider": "okta",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
       "description": "Compute a deactivation with its full blast radius, snapshot and fingerprint the state it depends on, and recommend suspension instead where the change may need undoing. Nothing is written.",
       "side_effects": "none",
       "input_schema": {

@@ -168,7 +168,35 @@ real pressure.
 Where a claim in this repository depends on scale that was never run, it says so. No
 number in the documentation is an extrapolation presented as a measurement.
 
-## 10. Scope of the claim
+## 10. Three contract mistakes found by installing the station
+
+**verified**
+
+Passing the marketplace listing linter says nothing about whether a module runs.
+Installing the station and reading its loader found three things wrong with this
+bundle that no amount of documentation reading had caught.
+
+**The credential helper is injected, not global.** `vault_get` lives inside an
+`__rc_helpers__` dict placed in the module namespace. A handler reaching for a bare
+global `vault_get` finds nothing and fails at the first command.
+
+**A returned failure is recorded as a success.** The station treats a returned dict as
+a completed action and writes a receipt saying so. This module previously returned
+structured failure envelopes, which would have produced receipts asserting that failed
+operations succeeded. That is the precise opposite of the fail closed behaviour it
+claims. Failures now raise, and the structured detail rides in the exception so it
+reaches the fail safe receipt.
+
+**The manifest needed more than the listing gate asks for.** Real modules carry
+`manifest_version: 2`, `provider`, `category`, `credential_spec`, `allowed_destinations`,
+and per command `mode`, `risk`, `preview`, `receipt_required` and `requires`. The listing
+linter accepted a manifest without any of them.
+
+`tools/station_check.py` now replicates the loader contract so these cannot regress. It
+should be re run after a station upgrade, because it is a copy of behaviour read out of
+one version.
+
+## 11. Scope of the claim
 
 This module produces evidence that a human reviews. It is a human in the loop record,
 not a certified compliance product, and it does not by itself satisfy any control in
