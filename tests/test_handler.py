@@ -323,6 +323,122 @@ class DpopTests(unittest.TestCase):
         self.assertIsNone(handler._dpop_nonce_from({"Other": "x"}))
 
 
+class LinkHeaderTests(unittest.TestCase):
+    """Okta pages with Link headers. Misreading one silently truncates a set."""
+
+    def test_next_link_is_extracted(self):
+        header = {
+            "Link": '<https://a.okta.com/api/v1/users?after=1>; rel="next", '
+            '<https://a.okta.com/api/v1/users>; rel="self"'
+        }
+        self.assertEqual(
+            handler._next_link(header), "https://a.okta.com/api/v1/users?after=1"
+        )
+
+    def test_self_only_means_no_further_pages(self):
+        header = {"Link": '<https://a.okta.com/api/v1/users>; rel="self"'}
+        self.assertIsNone(handler._next_link(header))
+
+    def test_absent_or_empty_header_is_not_a_page(self):
+        self.assertIsNone(handler._next_link({}))
+        self.assertIsNone(handler._next_link({"Link": ""}))
+
+    def test_lowercase_header_name_is_honoured(self):
+        header = {"link": '<https://a.okta.com/api/v1/users?after=2>; rel="next"'}
+        self.assertEqual(
+            handler._next_link(header), "https://a.okta.com/api/v1/users?after=2"
+        )
+
+
+class FakeClient:
+    """Serves canned pages so paging can be tested without a network."""
+
+    host = "a.okta.com"
+
+    def __init__(self, pages):
+        self.pages = pages
+        self.calls = []
+
+    def request(self, method, path, query=None, body=None, scopes=None):
+        self.calls.append((method, path, dict(query or {})))
+        return self.pages[len(self.calls) - 1]
+
+
+def _page(items, next_url=None):
+    headers = {}
+    if next_url:
+        headers["Link"] = "<" + next_url + '>; rel="next"'
+    return (200, headers, items)
+
+
+class PagingTests(unittest.TestCase):
+    def test_a_single_page_is_complete(self):
+        client = FakeClient([_page([{"id": "1"}, {"id": "2"}])])
+        result = handler._paged(client, "/users")
+        self.assertEqual(result["count"], 2)
+        self.assertTrue(result["complete"])
+
+    def test_pages_are_followed_to_the_end(self):
+        client = FakeClient(
+            [
+                _page([{"id": "1"}], "https://a.okta.com/api/v1/users?after=1"),
+                _page([{"id": "2"}], "https://a.okta.com/api/v1/users?after=2"),
+                _page([{"id": "3"}]),
+            ]
+        )
+        result = handler._paged(client, "/users")
+        self.assertEqual(result["count"], 3)
+        self.assertTrue(result["complete"])
+        self.assertEqual(len(client.calls), 3)
+
+    def test_the_after_cursor_is_carried_into_the_next_call(self):
+        client = FakeClient(
+            [
+                _page([{"id": "1"}], "https://a.okta.com/api/v1/users?after=abc"),
+                _page([{"id": "2"}]),
+            ]
+        )
+        handler._paged(client, "/users")
+        self.assertEqual(client.calls[1][2].get("after"), "abc")
+
+    def test_hitting_the_cap_reports_the_set_as_incomplete(self):
+        client = FakeClient(
+            [
+                _page([{"id": "1"}, {"id": "2"}], "https://a.okta.com/api/v1/users?after=1"),
+                _page([{"id": "3"}, {"id": "4"}], "https://a.okta.com/api/v1/users?after=2"),
+            ]
+        )
+        result = handler._paged(client, "/users", cap=3)
+        self.assertEqual(result["count"], 3)
+        self.assertFalse(result["complete"])
+
+    def test_a_refused_read_raises_rather_than_returning_an_empty_set(self):
+        client = FakeClient([(403, {}, {"errorSummary": "no"})])
+        with self.assertRaises(handler.AirlockError) as caught:
+            handler._paged(client, "/users")
+        self.assertEqual(caught.exception.code, "provider_refused")
+
+    def test_a_next_page_off_the_allowed_host_is_refused(self):
+        client = FakeClient(
+            [_page([{"id": "1"}], "https://evil.example.com/api/v1/users?after=1")]
+        )
+        with self.assertRaises(handler.AirlockError) as caught:
+            handler._paged(client, "/users")
+        self.assertEqual(caught.exception.code, "egress_blocked")
+
+
+class InputCoercionTests(unittest.TestCase):
+    def test_bad_values_fall_back_to_the_default(self):
+        self.assertEqual(handler._int(None, 200), 200)
+        self.assertEqual(handler._int("abc", 200), 200)
+        self.assertEqual(handler._int(0, 200), 200)
+        self.assertEqual(handler._int(-5, 200), 200)
+
+    def test_the_maximum_is_enforced(self):
+        self.assertEqual(handler._int(5000, 200, 200), 200)
+        self.assertEqual(handler._int(50, 200, 200), 50)
+
+
 class ManifestTests(unittest.TestCase):
     """The manifest and the handler must not drift apart."""
 

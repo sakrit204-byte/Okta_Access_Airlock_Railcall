@@ -1,7 +1,7 @@
 {
   "id": "sakrit204/okta_access_airlock",
   "slug": "sakrit204/okta_access_airlock",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",
   "auth": {
     "type": "oauth2",
@@ -28,6 +28,180 @@
       "description": "Report the remaining Okta rate limit headroom per endpoint bucket, so a bulk plan is never started that cannot finish.",
       "side_effects": "none",
       "input_schema": {}
+    },
+    {
+      "id": "users.find",
+      "title": "Find users",
+      "description": "Find users by Okta filter expression. Results from filter may feed a write. Results from search are marked advisory and may not, because Okta serves search from an eventually consistent datasource.",
+      "side_effects": "none",
+      "input_schema": {
+        "filter": {
+          "type": "string",
+          "required": false,
+          "label": "Filter expression",
+          "help": "Okta filter, for example: status eq \"ACTIVE\". Defaults to active users."
+        },
+        "search": {
+          "type": "string",
+          "required": false,
+          "label": "Free text search",
+          "help": "Eventually consistent. Marks the result advisory so it cannot feed an apply."
+        },
+        "page_size": {
+          "type": "number",
+          "required": false,
+          "default": 200,
+          "help": "Records per page, maximum 200."
+        },
+        "max_records": {
+          "type": "number",
+          "required": false,
+          "default": 500,
+          "help": "Stop after this many records and report the set as incomplete."
+        }
+      }
+    },
+    {
+      "id": "users.get",
+      "title": "Get one user",
+      "description": "Profile, status and credential posture for a single user.",
+      "side_effects": "none",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id or login",
+          "help": "Okta user id, or the user's login."
+        }
+      }
+    },
+    {
+      "id": "users.list_access",
+      "title": "List a user's access",
+      "description": "Groups, reachable applications and standing admin roles in one read. Application links are what the person can actually open, rather than what an assignment table implies.",
+      "side_effects": "none",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id or login",
+          "help": "Okta user id, or the user's login."
+        }
+      }
+    },
+    {
+      "id": "users.list_live_credentials",
+      "title": "List live credentials",
+      "description": "OAuth grants, per client refresh tokens and enrolled devices, which are the things that survive a deactivation. Reports plainly that Okta exposes no way to enumerate active sessions.",
+      "side_effects": "none",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id or login",
+          "help": "Okta user id, or the user's login."
+        }
+      }
+    },
+    {
+      "id": "groups.find",
+      "title": "Find groups",
+      "description": "Find groups by filter, paged to completion, reporting whether the set is complete.",
+      "side_effects": "none",
+      "input_schema": {
+        "filter": {
+          "type": "string",
+          "required": false,
+          "label": "Filter expression",
+          "help": "Okta group filter expression."
+        },
+        "q": {
+          "type": "string",
+          "required": false,
+          "label": "Name prefix",
+          "help": "Match groups whose name starts with this."
+        },
+        "max_records": {
+          "type": "number",
+          "required": false,
+          "default": 500,
+          "help": "Stop after this many records and report the set as incomplete."
+        }
+      }
+    },
+    {
+      "id": "groups.get_members",
+      "title": "Get group members",
+      "description": "Every member of one group, paged to completion so a set is never half reported.",
+      "side_effects": "none",
+      "input_schema": {
+        "group_id": {
+          "type": "string",
+          "required": true,
+          "label": "Group id",
+          "help": "Okta group id."
+        },
+        "max_records": {
+          "type": "number",
+          "required": false,
+          "default": 1000,
+          "help": "Stop after this many records and report the set as incomplete."
+        }
+      }
+    },
+    {
+      "id": "access.rule_entanglement",
+      "title": "Check rule entanglement",
+      "description": "Report whether removing a membership would also permanently modify a group rule. Okta adds a manually removed user to the rule's exception list, which affects every other member the rule governs and cannot be undone without suspending the rule org wide.",
+      "side_effects": "none",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "The user whose membership would be removed."
+        },
+        "group_id": {
+          "type": "string",
+          "required": true,
+          "label": "Group id",
+          "help": "The group they would be removed from."
+        }
+      }
+    },
+    {
+      "id": "access.explain",
+      "title": "Explain access",
+      "description": "Why can this user reach this application? Direct assignment, or through which group, or through which rule. The question an access review exists to answer.",
+      "side_effects": "none",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "Okta user id."
+        },
+        "app_id": {
+          "type": "string",
+          "required": true,
+          "label": "Application id",
+          "help": "Okta application instance id."
+        }
+      }
+    },
+    {
+      "id": "radius.user_deactivation",
+      "title": "Blast radius of a deactivation",
+      "description": "What this user loses on deactivation, and more importantly what survives it: group memberships, OAuth grants and refresh tokens all persist, and active sessions cannot be enumerated at all. Also names any group left with no owner.",
+      "side_effects": "none",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "Okta user id."
+        }
+      }
     }
   ]
 }

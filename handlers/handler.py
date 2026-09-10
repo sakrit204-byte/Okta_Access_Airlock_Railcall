@@ -726,6 +726,66 @@ def org_rate_budget(inputs, context):
     )
 
 
+def _next_link(headers):
+    """Okta pages with RFC 5988 Link headers, not offsets.
+
+    An offset based reader silently drops records once a set spans pages, which is
+    the kind of failure that looks like clean output.
+    """
+    raw = headers.get("Link") or headers.get("link")
+    if not raw:
+        return None
+    for part in raw.split(","):
+        section = part.split(";")
+        if len(section) < 2:
+            continue
+        url = section[0].strip().strip("<>")
+        for attribute in section[1:]:
+            if attribute.strip().replace(" ", "").lower() in (
+                'rel="next"',
+                "rel=next",
+            ):
+                return url
+    return None
+
+
+def _paged(client, path, query=None, cap=1000):
+    """Read a collection to completion, or stop honestly at the cap.
+
+    Never returns a partially read set without saying so. A half reported set is
+    worse than no set, because a plan built on it looks complete.
+    """
+    items = []
+    status, headers, body = client.request("GET", path, query=query)
+    if status >= 400:
+        raise AirlockError(
+            "provider_refused",
+            "Okta refused a read of " + path + ".",
+            {"http_status": status, "provider_message": _provider_message(body)},
+        )
+    if isinstance(body, list):
+        items.extend(body)
+
+    next_url = _next_link(headers)
+    while next_url and len(items) < cap:
+        _assert_allowed(next_url, client.host)
+        parts = urllib.parse.urlsplit(next_url)
+        relative = parts.path.split(API_PREFIX, 1)[-1]
+        follow_query = dict(urllib.parse.parse_qsl(parts.query))
+        status, headers, body = client.request("GET", relative, query=follow_query)
+        if status >= 400 or not isinstance(body, list):
+            break
+        items.extend(body)
+        next_url = _next_link(headers)
+
+    return {
+        "items": items[:cap],
+        "count": len(items[:cap]),
+        "complete": next_url is None or len(items) < cap,
+        "cap": cap,
+    }
+
+
 def _provider_message(parsed):
     if isinstance(parsed, dict):
         for key in ("errorSummary", "error_description", "message"):
@@ -734,8 +794,591 @@ def _provider_message(parsed):
     return None
 
 
+def _int(value, default, maximum=None):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return default
+    if number < 1:
+        return default
+    return min(number, maximum) if maximum else number
+
+
+def _client():
+    return OktaClient(_vault_credentials())
+
+
+def _get_one(client, path, missing_code="not_found"):
+    status, _headers, body = client.request("GET", path)
+    if status == 404:
+        raise AirlockError(missing_code, "Okta has no record at " + path + ".")
+    if status >= 400:
+        raise AirlockError(
+            "provider_refused",
+            "Okta refused a read of " + path + ".",
+            {"http_status": status, "provider_message": _provider_message(body)},
+        )
+    return body
+
+
+def _thin_user(record):
+    profile = (record or {}).get("profile") or {}
+    return {
+        "id": record.get("id"),
+        "status": record.get("status"),
+        "login": profile.get("login"),
+        "email": profile.get("email"),
+        "first_name": profile.get("firstName"),
+        "last_name": profile.get("lastName"),
+        "created": record.get("created"),
+        "last_login": record.get("lastLogin"),
+        "status_changed": record.get("statusChanged"),
+    }
+
+
+@_guard("users.find")
+def users_find(inputs, context):
+    """Find users. Filter results can feed a write; search results cannot.
+
+    Okta's search parameter reads from an eventually consistent datasource. A plan
+    built from it can target state the approving human never saw, which is exactly
+    the failure the plan and apply split exists to prevent. So search output is
+    marked advisory and carries a flag saying it must not feed an apply.
+    """
+    client = _client()
+    query = {}
+    advisory = False
+
+    if inputs.get("filter"):
+        query["filter"] = str(inputs["filter"])
+    if inputs.get("search"):
+        query["search"] = str(inputs["search"])
+        advisory = True
+    if not query:
+        query["filter"] = 'status eq "ACTIVE"'
+
+    query["limit"] = str(_int(inputs.get("page_size"), 200, 200))
+    page = _paged(client, "/users", query, _int(inputs.get("max_records"), 500))
+
+    warnings = []
+    if advisory:
+        warnings.append(
+            "Search was used, so this result is advisory and must not feed an apply. "
+            "Okta serves search from an eventually consistent datasource."
+        )
+    if not page["complete"]:
+        warnings.append(
+            "Stopped at the cap of "
+            + str(page["cap"])
+            + " records. This set is incomplete and must not feed an apply."
+        )
+
+    return _ok(
+        "users.find",
+        {
+            "users": [_thin_user(u) for u in page["items"]],
+            "count": page["count"],
+            "complete": page["complete"],
+            "advisory": advisory,
+            "may_feed_write": (not advisory) and page["complete"],
+            "query": query,
+        },
+        warnings or None,
+    )
+
+
+@_guard("users.get")
+def users_get(inputs, context):
+    """One user, with status and credential posture."""
+    user_id = inputs.get("user_id")
+    if not user_id:
+        raise AirlockError("input_missing", "user_id is required.")
+    client = _client()
+    record = _get_one(client, "/users/" + urllib.parse.quote(str(user_id)), "user_not_found")
+    credentials = (record or {}).get("credentials") or {}
+    return _ok(
+        "users.get",
+        {
+            "user": _thin_user(record),
+            "credential_provider": (credentials.get("provider") or {}).get("type"),
+            "has_password": bool(credentials.get("password")),
+            "recovery_question_set": bool(credentials.get("recovery_question")),
+            "activated": record.get("activated"),
+            "password_changed": record.get("passwordChanged"),
+        },
+    )
+
+
+@_guard("users.list_access")
+def users_list_access(inputs, context):
+    """Groups, applications and admin roles in one read.
+
+    appLinks is the honest answer to what a person can actually open, rather than
+    what an assignment table implies they can.
+    """
+    user_id = inputs.get("user_id")
+    if not user_id:
+        raise AirlockError("input_missing", "user_id is required.")
+    client = _client()
+    encoded = urllib.parse.quote(str(user_id))
+
+    groups = _paged(client, "/users/" + encoded + "/groups", {"limit": "200"})
+    app_links = _paged(client, "/users/" + encoded + "/appLinks")
+    roles = _paged(client, "/users/" + encoded + "/roles")
+
+    return _ok(
+        "users.list_access",
+        {
+            "user_id": user_id,
+            "groups": [
+                {
+                    "id": g.get("id"),
+                    "name": (g.get("profile") or {}).get("name"),
+                    "type": g.get("type"),
+                }
+                for g in groups["items"]
+            ],
+            "applications": [
+                {
+                    "app_instance_id": a.get("appInstanceId"),
+                    "label": a.get("label"),
+                    "app_name": a.get("appName"),
+                }
+                for a in app_links["items"]
+            ],
+            "admin_roles": [
+                {
+                    "assignment_id": r.get("id"),
+                    "type": r.get("type"),
+                    "label": r.get("label"),
+                    "status": r.get("status"),
+                    "assignment_type": r.get("assignmentType"),
+                }
+                for r in roles["items"]
+            ],
+            "counts": {
+                "groups": groups["count"],
+                "applications": app_links["count"],
+                "admin_roles": roles["count"],
+            },
+            "complete": groups["complete"] and app_links["complete"] and roles["complete"],
+        },
+    )
+
+
+@_guard("users.list_live_credentials")
+def users_list_live_credentials(inputs, context):
+    """What would still work after a deactivation.
+
+    Sessions, OAuth grants and per client refresh tokens are three separate things
+    behind three separate endpoints. Okta exposes no way to enumerate active
+    sessions, only to revoke them, so this reports that gap rather than implying a
+    count of zero means none exist.
+    """
+    user_id = inputs.get("user_id")
+    if not user_id:
+        raise AirlockError("input_missing", "user_id is required.")
+    client = _client()
+    encoded = urllib.parse.quote(str(user_id))
+
+    grants = _paged(client, "/users/" + encoded + "/grants")
+
+    clients = []
+    try:
+        clients = _paged(client, "/users/" + encoded + "/clients")["items"]
+    except AirlockError:
+        clients = []
+
+    tokens = []
+    for entry in clients:
+        client_id = entry.get("client_id") or entry.get("id")
+        if not client_id:
+            continue
+        try:
+            found = _paged(
+                client,
+                "/users/" + encoded + "/clients/" + urllib.parse.quote(str(client_id)) + "/tokens",
+            )
+        except AirlockError:
+            continue
+        for token in found["items"]:
+            tokens.append(
+                {
+                    "token_id": token.get("id"),
+                    "client_id": client_id,
+                    "client_name": entry.get("client_name"),
+                    "created": token.get("created"),
+                    "expires_at": token.get("expiresAt"),
+                }
+            )
+
+    devices = []
+    try:
+        devices = _paged(client, "/users/" + encoded + "/devices")["items"]
+    except AirlockError:
+        devices = []
+
+    return _ok(
+        "users.list_live_credentials",
+        {
+            "user_id": user_id,
+            "oauth_grants": [
+                {
+                    "id": g.get("id"),
+                    "client_id": g.get("clientId"),
+                    "scope_id": g.get("scopeId"),
+                    "created": g.get("created"),
+                }
+                for g in grants["items"]
+            ],
+            "refresh_tokens": tokens,
+            "devices": [
+                {"id": d.get("id"), "status": d.get("status")} for d in devices
+            ],
+            "counts": {
+                "oauth_grants": grants["count"],
+                "refresh_tokens": len(tokens),
+                "devices": len(devices),
+            },
+            "sessions": {
+                "enumerable": False,
+                "note": (
+                    "Okta exposes no endpoint that lists a user's active sessions, "
+                    "only one that revokes them. Active sessions may exist and "
+                    "cannot be counted here."
+                ),
+            },
+        },
+    )
+
+
+@_guard("groups.find")
+def groups_find(inputs, context):
+    """Find groups by filter, paged to completion."""
+    client = _client()
+    query = {"limit": str(_int(inputs.get("page_size"), 200, 200))}
+    if inputs.get("filter"):
+        query["filter"] = str(inputs["filter"])
+    if inputs.get("q"):
+        query["q"] = str(inputs["q"])
+    page = _paged(client, "/groups", query, _int(inputs.get("max_records"), 500))
+    return _ok(
+        "groups.find",
+        {
+            "groups": [
+                {
+                    "id": g.get("id"),
+                    "name": (g.get("profile") or {}).get("name"),
+                    "description": (g.get("profile") or {}).get("description"),
+                    "type": g.get("type"),
+                    "created": g.get("created"),
+                }
+                for g in page["items"]
+            ],
+            "count": page["count"],
+            "complete": page["complete"],
+        },
+        None if page["complete"] else ["Stopped at the record cap; set is incomplete."],
+    )
+
+
+@_guard("groups.get_members")
+def groups_get_members(inputs, context):
+    """Members of one group, paged to completion."""
+    group_id = inputs.get("group_id")
+    if not group_id:
+        raise AirlockError("input_missing", "group_id is required.")
+    client = _client()
+    encoded = urllib.parse.quote(str(group_id))
+    group = _get_one(client, "/groups/" + encoded, "group_not_found")
+    page = _paged(
+        client,
+        "/groups/" + encoded + "/users",
+        {"limit": "200"},
+        _int(inputs.get("max_records"), 1000),
+    )
+    return _ok(
+        "groups.get_members",
+        {
+            "group": {
+                "id": group.get("id"),
+                "name": (group.get("profile") or {}).get("name"),
+                "type": group.get("type"),
+            },
+            "members": [_thin_user(u) for u in page["items"]],
+            "count": page["count"],
+            "complete": page["complete"],
+        },
+        None if page["complete"] else ["Stopped at the record cap; set is incomplete."],
+    )
+
+
+@_guard("access.rule_entanglement")
+def access_rule_entanglement(inputs, context):
+    """Report whether removing a membership would also modify a group rule.
+
+    When an administrator manually removes a rule managed user from a group, Okta
+    adds that user to the rule's exception list. The membership change is what was
+    asked for. The rule change is not, it is permanent, and it affects every other
+    member the rule governs. Undoing it means deactivating, editing and
+    reactivating the rule, which briefly suspends it for the whole organisation.
+
+    A removal preview that does not say this is hiding the larger half of the
+    effect.
+    """
+    user_id = inputs.get("user_id")
+    group_id = inputs.get("group_id")
+    if not user_id or not group_id:
+        raise AirlockError("input_missing", "user_id and group_id are both required.")
+
+    client = _client()
+    encoded_group = urllib.parse.quote(str(group_id))
+    encoded_user = urllib.parse.quote(str(user_id))
+
+    status, _headers, body = client.request(
+        "GET", "/groups/" + encoded_group + "/users/" + encoded_user + "/group-rules"
+    )
+    if status >= 400:
+        raise AirlockError(
+            "provider_refused",
+            "Okta refused the rule lookup for this membership.",
+            {"http_status": status, "provider_message": _provider_message(body)},
+        )
+
+    rules = body if isinstance(body, list) else []
+    members = _paged(client, "/groups/" + encoded_group + "/users", {"limit": "200"})
+
+    entangled = bool(rules)
+    data = {
+        "user_id": user_id,
+        "group_id": group_id,
+        "rule_managed": entangled,
+        "rules": [
+            {"id": r.get("id"), "name": r.get("name"), "status": r.get("status")}
+            for r in rules
+        ],
+        "group_member_count": members["count"],
+        "second_order_effect": None,
+        "reversible": True,
+    }
+
+    warnings = None
+    if entangled:
+        names = ", ".join(str(r.get("name")) for r in rules) or "an unnamed rule"
+        data["second_order_effect"] = (
+            "Removing this membership will also add the user to the exception list "
+            "of " + names + ". That edit is permanent, it applies to the rule rather "
+            "than to this user, and the rule currently governs a group of "
+            + str(members["count"]) + " members."
+        )
+        data["reversible"] = False
+        data["undo_cost"] = (
+            "Reversing it requires deactivating the rule, editing the exception "
+            "list, and reactivating it, which suspends the rule for the whole "
+            "organisation while it is off."
+        )
+        warnings = [
+            "This removal modifies a group rule as well as a membership. Read "
+            "second_order_effect before approving."
+        ]
+
+    return _ok("access.rule_entanglement", data, warnings)
+
+
+@_guard("access.explain")
+def access_explain(inputs, context):
+    """Why can this user reach this application?
+
+    Direct assignment, or through which group, or through which rule. This is the
+    question an access review exists to answer and the one nobody can answer
+    quickly from the console.
+    """
+    user_id = inputs.get("user_id")
+    app_id = inputs.get("app_id")
+    if not user_id or not app_id:
+        raise AirlockError("input_missing", "user_id and app_id are both required.")
+
+    client = _client()
+    encoded_user = urllib.parse.quote(str(user_id))
+    encoded_app = urllib.parse.quote(str(app_id))
+
+    paths = []
+
+    status, _headers, direct = client.request(
+        "GET", "/apps/" + encoded_app + "/users/" + encoded_user
+    )
+    if status < 400 and isinstance(direct, dict):
+        paths.append(
+            {
+                "kind": "direct_assignment",
+                "detail": "Assigned to the application directly.",
+                "scope": direct.get("scope"),
+                "created": direct.get("created"),
+            }
+        )
+
+    app_groups = _paged(client, "/apps/" + encoded_app + "/groups")
+    assigned_group_ids = {g.get("id") for g in app_groups["items"] if g.get("id")}
+
+    user_groups = _paged(client, "/users/" + encoded_user + "/groups", {"limit": "200"})
+    for group in user_groups["items"]:
+        gid = group.get("id")
+        if gid not in assigned_group_ids:
+            continue
+        entry = {
+            "kind": "group_assignment",
+            "group_id": gid,
+            "group_name": (group.get("profile") or {}).get("name"),
+            "detail": "Reaches the application through this group.",
+            "rules": [],
+        }
+        rule_status, _h, rules = client.request(
+            "GET",
+            "/groups/" + urllib.parse.quote(str(gid)) + "/users/" + encoded_user + "/group-rules",
+        )
+        if rule_status < 400 and isinstance(rules, list) and rules:
+            entry["rules"] = [
+                {"id": r.get("id"), "name": r.get("name")} for r in rules
+            ]
+            entry["detail"] = (
+                "Reaches the application through this group, and the membership "
+                "itself is granted by a rule rather than by a person."
+            )
+        paths.append(entry)
+
+    reachable = _paged(client, "/users/" + encoded_user + "/appLinks")
+    has_link = any(
+        link.get("appInstanceId") == app_id for link in reachable["items"]
+    )
+
+    warnings = None
+    if has_link and not paths:
+        warnings = [
+            "The user can open this application but no direct or group assignment "
+            "explains it. Verify the application's own sign on policy before "
+            "concluding access has been removed."
+        ]
+
+    return _ok(
+        "access.explain",
+        {
+            "user_id": user_id,
+            "app_id": app_id,
+            "can_open_it": has_link,
+            "paths": paths,
+            "path_count": len(paths),
+            "explained": bool(paths) or not has_link,
+        },
+        warnings,
+    )
+
+
+@_guard("radius.user_deactivation")
+def radius_user_deactivation(inputs, context):
+    """What breaks if this user is deactivated, and what survives it.
+
+    The second half matters more. Deactivation does not remove group memberships,
+    and sessions, grants and refresh tokens are separate concerns. Presenting
+    deactivation as an off switch would be the most dangerous thing this module
+    could do.
+    """
+    user_id = inputs.get("user_id")
+    if not user_id:
+        raise AirlockError("input_missing", "user_id is required.")
+
+    client = _client()
+    encoded = urllib.parse.quote(str(user_id))
+    record = _get_one(client, "/users/" + encoded, "user_not_found")
+
+    groups = _paged(client, "/users/" + encoded + "/groups", {"limit": "200"})
+    app_links = _paged(client, "/users/" + encoded + "/appLinks")
+    roles = _paged(client, "/users/" + encoded + "/roles")
+
+    owned_at_risk = []
+    for group in groups["items"]:
+        gid = group.get("id")
+        if not gid:
+            continue
+        status, _h, owners = client.request(
+            "GET", "/groups/" + urllib.parse.quote(str(gid)) + "/owners"
+        )
+        if status >= 400 or not isinstance(owners, list):
+            continue
+        owner_ids = [o.get("id") for o in owners]
+        if user_id in owner_ids and len(owner_ids) == 1:
+            owned_at_risk.append(
+                {
+                    "group_id": gid,
+                    "group_name": (group.get("profile") or {}).get("name"),
+                    "detail": "This user is the only owner. The group would be left ownerless.",
+                }
+            )
+
+    live = users_list_live_credentials({"user_id": user_id}, context)
+    live_data = live.get("data", {}) if live.get("status") == "ok" else {}
+
+    survives = {
+        "group_memberships": groups["count"],
+        "oauth_grants": (live_data.get("counts") or {}).get("oauth_grants", 0),
+        "refresh_tokens": (live_data.get("counts") or {}).get("refresh_tokens", 0),
+        "sessions": "not enumerable",
+    }
+
+    warnings = [
+        "Deactivation does not remove group memberships. "
+        + str(groups["count"])
+        + " memberships would survive it."
+    ]
+    if survives["refresh_tokens"]:
+        warnings.append(
+            str(survives["refresh_tokens"])
+            + " refresh tokens exist and are revoked separately."
+        )
+    if owned_at_risk:
+        warnings.append(
+            str(len(owned_at_risk)) + " groups would be left with no owner."
+        )
+
+    return _ok(
+        "radius.user_deactivation",
+        {
+            "user": _thin_user(record),
+            "lost": {
+                "applications": [
+                    {"app_instance_id": a.get("appInstanceId"), "label": a.get("label")}
+                    for a in app_links["items"]
+                ],
+                "application_count": app_links["count"],
+                "admin_roles": [
+                    {"type": r.get("type"), "label": r.get("label")}
+                    for r in roles["items"]
+                ],
+                "admin_role_count": roles["count"],
+            },
+            "survives": survives,
+            "groups_left_ownerless": owned_at_risk,
+            "single_off_switch": False,
+            "note": (
+                "There is no single off switch. Applications stop resolving, but "
+                "memberships, grants and refresh tokens each need addressing on "
+                "their own, and active sessions cannot be enumerated at all."
+            ),
+        },
+        warnings,
+    )
+
+
 # The marketplace linter resolves a command id to a function by replacing dots and
 # dashes with underscores. An older publisher FAQ documents an _h_ prefix instead.
 # Both names are bound to the same function so neither loader can miss it.
 _h_org_verify_connection = org_verify_connection
 _h_org_rate_budget = org_rate_budget
+_h_users_find = users_find
+_h_users_get = users_get
+_h_users_list_access = users_list_access
+_h_users_list_live_credentials = users_list_live_credentials
+_h_groups_find = groups_find
+_h_groups_get_members = groups_get_members
+_h_access_rule_entanglement = access_rule_entanglement
+_h_access_explain = access_explain
+_h_radius_user_deactivation = radius_user_deactivation
