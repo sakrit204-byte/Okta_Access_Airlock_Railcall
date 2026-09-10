@@ -249,9 +249,9 @@ class RateBudget:
         self.buckets = {}
 
     def record(self, bucket, headers):
-        limit = headers.get("X-Rate-Limit-Limit")
-        remaining = headers.get("X-Rate-Limit-Remaining")
-        reset = headers.get("X-Rate-Limit-Reset")
+        limit = _header(headers, "X-Rate-Limit-Limit")
+        remaining = _header(headers, "X-Rate-Limit-Remaining")
+        reset = _header(headers, "X-Rate-Limit-Reset")
         if remaining is None:
             return
         self.buckets[bucket] = {
@@ -593,10 +593,7 @@ def _dpop_proof(key, method, url, nonce=None, access_token=None):
 
 
 def _dpop_nonce_from(headers):
-    for name in ("DPoP-Nonce", "dpop-nonce", "Dpop-Nonce"):
-        if headers.get(name):
-            return headers[name]
-    return None
+    return _header(headers, "DPoP-Nonce")
 
 
 def _wants_new_nonce(status, parsed):
@@ -726,13 +723,30 @@ def org_rate_budget(inputs, context):
     )
 
 
+def _header(headers, name):
+    """Case insensitive header lookup.
+
+    Okta returns its rate limit headers lowercase, and dict(response.headers)
+    discards the case insensitivity the HTTP layer provided. Looking them up by
+    the documented capitalisation therefore returns nothing, and the budget reads
+    as empty rather than as an error. Found by probing a live org.
+    """
+    if name in headers:
+        return headers[name]
+    wanted = name.lower()
+    for key, value in headers.items():
+        if str(key).lower() == wanted:
+            return value
+    return None
+
+
 def _next_link(headers):
     """Okta pages with RFC 5988 Link headers, not offsets.
 
     An offset based reader silently drops records once a set spans pages, which is
     the kind of failure that looks like clean output.
     """
-    raw = headers.get("Link") or headers.get("link")
+    raw = _header(headers, "Link")
     if not raw:
         return None
     for part in raw.split(","):
@@ -784,6 +798,36 @@ def _paged(client, path, query=None, cap=1000):
         "complete": next_url is None or len(items) < cap,
         "cap": cap,
     }
+
+
+def _paged_optional(client, path, query=None, cap=1000):
+    """Read a collection that the caller's admin role may not be allowed to see.
+
+    Returns an unavailable marker rather than raising, so one forbidden sub read
+    does not fail a command whose other halves worked. The marker is surfaced to
+    the user; it is never silently rendered as an empty list, because "no admin
+    roles" and "not allowed to see admin roles" are different answers.
+    """
+    try:
+        result = _paged(client, path, query, cap)
+        result["available"] = True
+        return result
+    except AirlockError as err:
+        if err.code != "provider_refused":
+            raise
+        if (err.detail or {}).get("http_status") not in (401, 403):
+            raise
+        return {
+            "items": [],
+            "count": None,
+            "complete": False,
+            "available": False,
+            "reason": (
+                "The admin role assigned to this application is not permitted to "
+                "read " + path + ". This is a permission on the role, not a "
+                "missing OAuth scope."
+            ),
+        }
 
 
 def _provider_message(parsed):
@@ -924,7 +968,7 @@ def users_list_access(inputs, context):
 
     groups = _paged(client, "/users/" + encoded + "/groups", {"limit": "200"})
     app_links = _paged(client, "/users/" + encoded + "/appLinks")
-    roles = _paged(client, "/users/" + encoded + "/roles")
+    roles = _paged_optional(client, "/users/" + encoded + "/roles")
 
     return _ok(
         "users.list_access",
@@ -956,13 +1000,17 @@ def users_list_access(inputs, context):
                 }
                 for r in roles["items"]
             ],
+            "admin_roles_available": roles["available"],
             "counts": {
                 "groups": groups["count"],
                 "applications": app_links["count"],
                 "admin_roles": roles["count"],
             },
-            "complete": groups["complete"] and app_links["complete"] and roles["complete"],
+            "complete": groups["complete"] and app_links["complete"],
         },
+        None
+        if roles["available"]
+        else ["Admin roles could not be read: " + roles["reason"]],
     )
 
 
@@ -1292,7 +1340,7 @@ def radius_user_deactivation(inputs, context):
 
     groups = _paged(client, "/users/" + encoded + "/groups", {"limit": "200"})
     app_links = _paged(client, "/users/" + encoded + "/appLinks")
-    roles = _paged(client, "/users/" + encoded + "/roles")
+    roles = _paged_optional(client, "/users/" + encoded + "/roles")
 
     owned_at_risk = []
     for group in groups["items"]:
@@ -1354,6 +1402,7 @@ def radius_user_deactivation(inputs, context):
                     for r in roles["items"]
                 ],
                 "admin_role_count": roles["count"],
+                "admin_roles_available": roles["available"],
             },
             "survives": survives,
             "groups_left_ownerless": owned_at_risk,

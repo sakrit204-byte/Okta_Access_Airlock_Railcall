@@ -142,6 +142,82 @@ correct behaviour to see from an application with a valid identity and no permis
 and it confirms the whole auth path: assertion signing, DPoP proof, nonce handshake and
 egress allowlist.
 
-**Still to measure**, once scopes are granted: feature availability per endpoint on this
-org tier, which rate limit headers are returned and per which bucket, how paging is
-signalled, and the observed System Log watermark.
+**2026 09 10 — first full probe, with all five read scopes granted.**
+
+Scopes confirmed granted and working: `okta.apps.read`, `okta.groups.read`,
+`okta.logs.read`, `okta.roles.read`, `okta.users.read`.
+
+**Measured rate limits on the Integrator Free Plan**, per minute per bucket, read from
+Okta's own response headers rather than from documentation:
+
+```
+/users    300
+/groups   250
+/logs      60
+/apps      50
+```
+
+`/apps` at fifty a minute is the tight one. Any command that fans out across
+applications has to budget against it, which is what `org.rate_budget` exists for.
+
+**The rate budget was recording nothing, and the probe caught it.** Okta returns those
+headers lowercase, and `dict(response.headers)` discards the case insensitivity the HTTP
+layer provided, so looking them up by their documented capitalisation silently returned
+nothing. The budget read as empty rather than as an error, which is the worst kind of
+bug: a safety feature that is quietly switched off. Header lookup is now case
+insensitive throughout, including the Link and DPoP nonce headers, which had the same
+latent problem.
+
+**Group rules are reachable on this tier.** `/groups/rules` answers 200. This was the
+single biggest open risk, because `access.rule_entanglement` is one of the two things
+that differentiate this module and it would have been worthless behind a paywall.
+
+**Admin role reads are refused, and it is the admin role rather than the scope.**
+`okta.roles.read` is granted, and every one of these still answers 403 "You do not have
+permission to perform the requested action":
+
+```
+/users/{id}/roles
+/iam/roles
+/iam/assignees/users
+/iam/resource-sets
+```
+
+The Read-only Administrator role assigned to the application is not permitted to read
+admin role assignments. Granting more OAuth scope does not fix it; it needs a more
+privileged admin role, which is a trade against the least privilege posture this module
+argues for. Commands now degrade rather than fail: `users.list_access` and
+`radius.user_deactivation` return `admin_roles_available: false` with the reason, and
+never render "not allowed to see admin roles" as "no admin roles", because those are
+different answers.
+
+**The System Log carries what custody needs.** A sample event exposes `actor` with id,
+type, alternateId and displayName, `client` with userAgent, ipAddress and geo, and
+`outcome` with result and reason. `user.account.privilege.grant` and
+`user.account.privilege.revoke` are both queryable by `eventType` filter, so admin
+privilege changes remain visible in the log even though the roles API is closed to us.
+
+**Observed System Log watermark: 14 to 25 seconds** behind wall clock across two
+samples. That is a measurement of one org at two moments and is not a bound. Okta
+publishes no maximum delivery latency, so it never becomes one.
+
+**Paging could not be exercised.** The org holds one user, so `/users?limit=1` returns
+only `rel="self"` and no `rel="next"`. The paging logic is proven by the offline suite
+against canned Link headers, including cursor carry over and refusal of a next page
+pointing off the allowed host, but it has not been run against a genuinely multi page
+Okta response. Stated rather than glossed.
+
+**Commands run live and behaving:**
+
+```
+users.find                  ok    1 user, may_feed_write true
+users.list_access           ok    1 group, 1 app, roles unavailable with reason
+radius.user_deactivation    ok    see below
+groups.find                 ok    2 groups, complete
+access.rule_entanglement    ok    membership not rule managed
+```
+
+Worth recording what the blast radius command found on a **one user, freshly created
+org**: two OAuth refresh tokens that survive a deactivation, and one group membership
+that survives it. On an org that has done nothing. That is the argument for the command
+existing, made by the org itself rather than by us.

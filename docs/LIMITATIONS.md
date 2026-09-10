@@ -116,7 +116,42 @@ Two consequences worth knowing:
   Getting this wrong produces an intermittent authentication failure that only appears
   when a retry happens, which is why it is called out here.
 
-## 8. What the development org could not prove
+## 8. Reading admin roles needs more than a read only admin role
+
+**verified**
+
+`okta.roles.read` is not sufficient on its own. With that scope granted and the
+application assigned Okta's **Read-only Administrator** role, all of these still answer
+403:
+
+```
+/users/{id}/roles
+/iam/roles
+/iam/assignees/users
+/iam/resource-sets
+```
+
+The refusal comes from the admin role, not the OAuth scope, so granting more scope does
+not help. Reading admin role assignments requires a more privileged admin role, which is
+a genuine trade against the least privilege posture this module argues for elsewhere.
+
+**What this module does.** It refuses to guess. `users.list_access` and
+`radius.user_deactivation` return `admin_roles_available: false` together with the
+reason, and never render an empty list. "This user holds no admin roles" and "we are not
+allowed to see whether this user holds admin roles" are different answers, and a module
+that collapses them is lying by omission in the one place it matters most.
+
+`org.verify_connection` names the affected commands on first run, so this is discovered
+before it matters rather than during an access review.
+
+**The partial route that remains open.** Admin privilege changes stay visible in the
+System Log as `user.account.privilege.grant` and `user.account.privilege.revoke`, with
+actor, timestamp and client IP. So privilege changes can be observed even where the
+current standing state cannot be read. That is genuinely weaker: the log shows changes
+within its retention window, not the present truth, and a grant older than that window
+is invisible. It is reported as what it is.
+
+## 9. What the development org could not prove
 
 **verified**
 
@@ -133,7 +168,7 @@ real pressure.
 Where a claim in this repository depends on scale that was never run, it says so. No
 number in the documentation is an extrapolation presented as a measurement.
 
-## 9. Scope of the claim
+## 10. Scope of the claim
 
 This module produces evidence that a human reviews. It is a human in the loop record,
 not a certified compliance product, and it does not by itself satisfy any control in
