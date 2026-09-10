@@ -161,8 +161,16 @@ application assigned Okta's **Read-only Administrator** role, all of these still
 ```
 
 The refusal comes from the admin role, not the OAuth scope, so granting more scope does
-not help. Reading admin role assignments requires a more privileged admin role, which is
-a genuine trade against the least privilege posture this module argues for elsewhere.
+not help.
+
+**Raising the role does not help either, which is worth knowing before you try.** These
+were re tested after moving the application from Read only Administrator to
+**Organization Administrator**, a role that can create and delete users and groups. Every
+one of them still answers 403. So reading who holds administrative privilege appears to
+need Super Administrator, which is precisely the role this module argues nobody should
+give an integration.
+
+That is not a trade worth making. The module works around it instead, at a stated cost.
 
 **What this module does.** It refuses to guess. `users.list_access` and
 `radius.user_deactivation` return `admin_roles_available: false` together with the
