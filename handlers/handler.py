@@ -1744,6 +1744,416 @@ def plan_deactivate_user(inputs, context):
     )
 
 
+DORMANT_DAYS_DEFAULT = 90
+
+
+def _days_since(stamp):
+    if not stamp:
+        return None
+    try:
+        clean = str(stamp).replace("Z", "").split(".")[0]
+        parsed = time.strptime(clean, "%Y-%m-%dT%H:%M:%S")
+        return int((time.time() - time.mktime(parsed) + time.timezone) / 86400)
+    except (ValueError, TypeError):
+        return None
+
+
+@_guard("org.describe")
+def org_describe(inputs, context):
+    """Org posture, built from what this admin role can actually read.
+
+    Deliberately not a call to a single org endpoint. Read only administrator
+    cannot read several of those, and a command that half fails is less useful
+    than one that reports exactly what it could see.
+    """
+    client = _client()
+    users = _paged(client, "/users", {"limit": "200"}, _int(inputs.get("max_users"), 500))
+    groups = _paged(client, "/groups", {"limit": "200"}, 500)
+    apps = _paged(client, "/apps", {"limit": "200"}, 500)
+    rules = _paged_optional(client, "/groups/rules", {"limit": "200"}, 200)
+
+    by_status = {}
+    dormant_days = _int(inputs.get("dormant_days"), DORMANT_DAYS_DEFAULT)
+    dormant = []
+    never_signed_in = []
+    for user in users["items"]:
+        status = user.get("status") or "UNKNOWN"
+        by_status[status] = by_status.get(status, 0) + 1
+        thin = _thin_user(user)
+        if not thin["last_login"]:
+            never_signed_in.append(thin)
+            continue
+        age = _days_since(thin["last_login"])
+        if age is not None and age >= dormant_days:
+            thin["days_since_login"] = age
+            dormant.append(thin)
+
+    return _ok(
+        "org.describe",
+        {
+            "org_host": client.host,
+            "users": {
+                "counted": users["count"],
+                "complete": users["complete"],
+                "by_status": by_status,
+                "dormant_threshold_days": dormant_days,
+                "dormant": dormant,
+                "never_signed_in": never_signed_in,
+            },
+            "groups": {"counted": groups["count"], "complete": groups["complete"]},
+            "applications": {"counted": apps["count"], "complete": apps["complete"]},
+            "group_rules": {
+                "available": rules["available"],
+                "counted": rules["count"],
+                "reason": rules.get("reason"),
+            },
+            "rate_budget": client.budget.snapshot(),
+        },
+        None
+        if users["complete"]
+        else ["The user list was capped, so these counts are a floor, not a total."],
+    )
+
+
+@_guard("access.review_pack")
+def access_review_pack(inputs, context):
+    """The standing access report an access review actually asks for.
+
+    One row per person: what they can open, which groups grant it, whether they
+    hold standing admin, and how long since they last signed in. This is the
+    artifact that otherwise gets assembled by hand from spreadsheets.
+    """
+    client = _client()
+    query = {"limit": "200"}
+    if inputs.get("filter"):
+        query["filter"] = str(inputs["filter"])
+    else:
+        query["filter"] = 'status eq "ACTIVE"'
+
+    users = _paged(client, "/users", query, _int(inputs.get("max_users"), 200))
+    dormant_days = _int(inputs.get("dormant_days"), DORMANT_DAYS_DEFAULT)
+
+    rows = []
+    roles_readable = True
+    for user in users["items"]:
+        uid = user.get("id")
+        if not uid:
+            continue
+        encoded = urllib.parse.quote(str(uid))
+        thin = _thin_user(user)
+        groups = _paged(client, "/users/" + encoded + "/groups", {"limit": "200"})
+        apps = _paged(client, "/users/" + encoded + "/appLinks")
+        roles = _paged_optional(client, "/users/" + encoded + "/roles")
+        if not roles["available"]:
+            roles_readable = False
+
+        age = _days_since(thin["last_login"])
+        rows.append(
+            {
+                "user": thin,
+                "days_since_login": age,
+                "dormant": age is not None and age >= dormant_days,
+                "never_signed_in": not thin["last_login"],
+                "groups": [
+                    (g.get("profile") or {}).get("name") for g in groups["items"]
+                ],
+                "applications": [a.get("label") for a in apps["items"]],
+                "application_count": apps["count"],
+                "admin_roles": [r.get("label") or r.get("type") for r in roles["items"]],
+                "admin_roles_available": roles["available"],
+                "holds_standing_admin": bool(roles["items"]) if roles["available"] else None,
+            }
+        )
+
+    warnings = []
+    if not roles_readable:
+        warnings.append(
+            "Admin roles could not be read for at least one person, so this pack "
+            "cannot answer who holds standing admin. That is a permission on the "
+            "admin role assigned to this application, not a missing scope."
+        )
+    if not users["complete"]:
+        warnings.append(
+            "The population was capped, so this pack covers a subset and must not "
+            "be presented as a complete review."
+        )
+
+    return _ok(
+        "access.review_pack",
+        {
+            "generated_at": _now_iso(),
+            "org_host": client.host,
+            "population_filter": query["filter"],
+            "reviewed": len(rows),
+            "complete": users["complete"],
+            "dormant_threshold_days": dormant_days,
+            "rows": rows,
+            "summary": {
+                "dormant": sum(1 for r in rows if r["dormant"]),
+                "never_signed_in": sum(1 for r in rows if r["never_signed_in"]),
+                "with_standing_admin": (
+                    sum(1 for r in rows if r["holds_standing_admin"])
+                    if roles_readable
+                    else None
+                ),
+            },
+        },
+        warnings or None,
+    )
+
+
+@_guard("radius.group_deletion")
+def radius_group_deletion(inputs, context):
+    """If this group is deleted, exactly who loses which applications."""
+    group_id = inputs.get("group_id")
+    if not group_id:
+        raise AirlockError("input_missing", "group_id is required.")
+
+    client = _client()
+    encoded = urllib.parse.quote(str(group_id))
+    group = _get_one(client, "/groups/" + encoded, "group_not_found")
+    members = _paged(client, "/groups/" + encoded + "/users", {"limit": "200"})
+    apps = _paged(client, "/groups/" + encoded + "/apps")
+    rules = _paged_optional(client, "/groups/rules", {"limit": "200"}, 200)
+
+    managing_rules = []
+    for rule in rules["items"]:
+        assigned = (
+            ((rule.get("actions") or {}).get("assignUserToGroups") or {}).get("groupIds")
+            or []
+        )
+        if group_id in assigned:
+            managing_rules.append({"id": rule.get("id"), "name": rule.get("name")})
+
+    warnings = [
+        str(members["count"])
+        + " people would lose the "
+        + str(apps["count"])
+        + " applications this group grants."
+    ]
+    if managing_rules:
+        warnings.append(
+            str(len(managing_rules))
+            + " group rules assign users into this group and would be left "
+            "pointing at a group that no longer exists."
+        )
+
+    return _ok(
+        "radius.group_deletion",
+        {
+            "group": {
+                "id": group.get("id"),
+                "name": (group.get("profile") or {}).get("name"),
+                "type": group.get("type"),
+            },
+            "members_affected": members["count"],
+            "members": [_thin_user(u) for u in members["items"]],
+            "applications_lost": [
+                {"id": a.get("id"), "label": a.get("label"), "name": a.get("name")}
+                for a in apps["items"]
+            ],
+            "application_count": apps["count"],
+            "rules_left_dangling": managing_rules,
+            "complete": members["complete"] and apps["complete"],
+            "reversible": False,
+            "note": (
+                "Deleting a group is not reversible and does not restore the "
+                "memberships it carried. There is no delete command in this "
+                "module; this exists so the consequence can be seen before "
+                "somebody does it in the console."
+            ),
+        },
+        warnings,
+    )
+
+
+@_guard("custody.audit_pack")
+def custody_audit_pack(inputs, context):
+    """The evidence bundle, assembled from the provider's own records.
+
+    Deliberately contains no assertion this module makes about itself. Every
+    line either came from Okta or is a count of something that did.
+    """
+    since = inputs.get("since")
+    detected = custody_detect_ungoverned(
+        {"since": since, "max_events": _int(inputs.get("max_events"), 500)}, context
+    )
+    posture = org_describe({"max_users": _int(inputs.get("max_users"), 200)}, context)
+
+    detected_data = detected.get("data") or {}
+    posture_data = posture.get("data") or {}
+
+    return _ok(
+        "custody.audit_pack",
+        {
+            "generated_at": _now_iso(),
+            "org_host": posture_data.get("org_host"),
+            "window_since": since,
+            "log_watermark": detected_data.get("log_watermark"),
+            "log_read_complete": detected_data.get("log_read_complete"),
+            "access_changes": {
+                "examined": detected_data.get("events_examined"),
+                "counts": detected_data.get("counts"),
+                "ungoverned": detected_data.get("ungoverned"),
+            },
+            "posture": {
+                "users": (posture_data.get("users") or {}).get("counted"),
+                "by_status": (posture_data.get("users") or {}).get("by_status"),
+                "dormant": len((posture_data.get("users") or {}).get("dormant") or []),
+                "groups": (posture_data.get("groups") or {}).get("counted"),
+                "applications": (posture_data.get("applications") or {}).get("counted"),
+            },
+            "claim": detected_data.get("claim"),
+            "what_this_is_not": [
+                "Not a certified compliance artifact, and it satisfies no control "
+                "in any framework by itself.",
+                "Not a claim that no ungoverned change occurred. Okta publishes no "
+                "maximum System Log delivery latency, so every statement here is "
+                "bounded by the watermark above.",
+                "Not a complete admin inventory where admin roles could not be "
+                "read; that limitation is reported rather than filled in.",
+            ],
+        },
+        detected.get("warnings"),
+    )
+
+
+@_guard("plan.reset_factors")
+def plan_reset_factors(inputs, context):
+    """Plan an MFA reset, which is treated here as the takeover vector it is."""
+    user_id = inputs.get("user_id")
+    if not user_id:
+        raise AirlockError("input_missing", "user_id is required.")
+
+    client = _client()
+    encoded = urllib.parse.quote(str(user_id))
+    user = _get_one(client, "/users/" + encoded, "user_not_found")
+    factors = _paged_optional(client, "/users/" + encoded + "/factors")
+
+    snapshot = {
+        "user_id": user_id,
+        "status": user.get("status"),
+        "factor_ids": sorted(f.get("id") for f in factors["items"] if f.get("id")),
+        "factor_count": factors["count"],
+    }
+    preview = {
+        "user": _thin_user(user),
+        "factors_now": [
+            {
+                "id": f.get("id"),
+                "type": f.get("factorType"),
+                "provider": f.get("provider"),
+                "status": f.get("status"),
+            }
+            for f in factors["items"]
+        ],
+        "factors_available": factors["available"],
+        "after": "The user will be prompted to enrol again at next sign in.",
+    }
+    warnings = [
+        "Resetting MFA removes the second factor from this account. Between the "
+        "reset and re enrolment, a password alone reaches this account, so this "
+        "is an account takeover vector and not a routine support action.",
+        "Confirm you are talking to the actual person through a channel that does "
+        "not depend on this account.",
+    ]
+    return _ok(
+        "plan.reset_factors",
+        _plan_envelope(
+            "plan.reset_factors",
+            "apply.reset_factors",
+            {"user_id": user_id, "action": "reset_factors"},
+            snapshot,
+            preview,
+            warnings,
+        ),
+        warnings,
+    )
+
+
+@_guard("plan.offboard_user")
+def plan_offboard_user(inputs, context):
+    """Plan a full offboarding, one step per thing that survives a deactivation."""
+    user_id = inputs.get("user_id")
+    if not user_id:
+        raise AirlockError("input_missing", "user_id is required.")
+
+    radius = radius_user_deactivation({"user_id": user_id}, context)
+    detail = radius["data"]
+
+    client = _client()
+    encoded = urllib.parse.quote(str(user_id))
+    groups = _paged(client, "/users/" + encoded + "/groups", {"limit": "200"})
+    if not groups["complete"]:
+        raise AirlockError(
+            "set_incomplete",
+            "This user's group memberships could not be read to completion, so an "
+            "offboarding plan over them would be built on a partial set.",
+        )
+
+    group_ids = sorted(g.get("id") for g in groups["items"] if g.get("id"))
+    entangled = []
+    for gid in group_ids:
+        report = access_rule_entanglement({"user_id": user_id, "group_id": gid}, context)
+        if report.get("status") == "ok" and report["data"].get("rule_managed"):
+            entangled.append(
+                {
+                    "group_id": gid,
+                    "rules": report["data"].get("rules"),
+                    "second_order_effect": report["data"].get("second_order_effect"),
+                }
+            )
+
+    steps = [
+        {"order": 1, "step": "revoke_live_credentials", "apply_with": "apply.revoke_live_credentials",
+         "why": "Sessions, grants and refresh tokens survive a deactivation, so they go first."},
+        {"order": 2, "step": "remove_group_memberships", "apply_with": "apply.group_membership",
+         "why": "Memberships are not removed by deactivation and keep granting application access.",
+         "groups": group_ids},
+        {"order": 3, "step": "deactivate", "apply_with": "apply.deactivate_user",
+         "why": "Last, because it does not undo anything above."},
+    ]
+
+    snapshot = {
+        "user_id": user_id,
+        "status": detail["user"].get("status"),
+        "group_ids": group_ids,
+        "application_count": detail["lost"]["application_count"],
+        "refresh_tokens": (detail["survives"] or {}).get("refresh_tokens"),
+    }
+    warnings = list(radius.get("warnings") or [])
+    warnings.append(
+        "This is a plan of three separate applies, not one command. Each is "
+        "approved and receipted on its own, because a single flag across three "
+        "revocations would hide a partial result."
+    )
+    if entangled:
+        warnings.append(
+            str(len(entangled))
+            + " of these group removals would also permanently modify a group rule."
+        )
+
+    return _ok(
+        "plan.offboard_user",
+        _plan_envelope(
+            "plan.offboard_user",
+            "apply.offboard_user",
+            {"user_id": user_id, "action": "offboard", "group_ids": group_ids},
+            snapshot,
+            {
+                "user": detail["user"],
+                "steps": steps,
+                "loses": detail["lost"],
+                "survives_deactivation_alone": detail["survives"],
+                "groups_left_ownerless": detail["groups_left_ownerless"],
+                "rule_entanglement": entangled,
+            },
+            warnings,
+        ),
+        warnings,
+    )
+
+
 def _settle(client, method, path, body=None, prior=None):
     """Run one write and report which of three things happened.
 
@@ -2348,6 +2758,7 @@ def custody_report(inputs, context):
 # Both names are bound to the same function so neither loader can miss it.
 _h_org_verify_connection = org_verify_connection
 _h_org_rate_budget = org_rate_budget
+_h_org_describe = org_describe
 _h_users_find = users_find
 _h_users_get = users_get
 _h_users_list_access = users_list_access
@@ -2356,11 +2767,16 @@ _h_groups_find = groups_find
 _h_groups_get_members = groups_get_members
 _h_access_rule_entanglement = access_rule_entanglement
 _h_access_explain = access_explain
+_h_access_review_pack = access_review_pack
 _h_radius_user_deactivation = radius_user_deactivation
+_h_radius_group_deletion = radius_group_deletion
 _h_plan_group_membership = plan_group_membership
 _h_plan_deactivate_user = plan_deactivate_user
+_h_plan_reset_factors = plan_reset_factors
+_h_plan_offboard_user = plan_offboard_user
 _h_custody_detect_ungoverned = custody_detect_ungoverned
 _h_custody_report = custody_report
+_h_custody_audit_pack = custody_audit_pack
 _h_apply_group_membership = apply_group_membership
 _h_apply_suspend_user = apply_suspend_user
 _h_apply_unsuspend_user = apply_unsuspend_user

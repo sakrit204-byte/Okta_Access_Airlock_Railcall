@@ -2,7 +2,7 @@
   "id": "sakrit204/okta_access_airlock",
   "name": "Okta Access Airlock",
   "manifest_version": 2,
-  "version": "0.6.0",
+  "version": "0.7.0",
   "provider": "okta",
   "category": "Identity",
   "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",
@@ -652,6 +652,186 @@
       ],
       "description": "Revoke sessions, OAuth grants and per client refresh tokens, reporting each separately rather than as one success flag. Okta cannot enumerate sessions, so the session result reports that the revocation was accepted, not how many it ended.",
       "side_effects": "external",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "Okta user id."
+        }
+      }
+    },
+    {
+      "id": "org.describe",
+      "title": "Describe the org",
+      "provider": "okta",
+      "risk": "low",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Org posture built from what the assigned admin role can actually read: user counts by status, dormant and never signed in accounts, group and application counts, and whether group rules are reachable. Reports what it could not see rather than filling it in.",
+      "side_effects": "none",
+      "input_schema": {
+        "dormant_days": {
+          "type": "number",
+          "required": false,
+          "default": 90,
+          "help": "Days without a sign in before an account counts as dormant."
+        },
+        "max_users": {
+          "type": "number",
+          "required": false,
+          "default": 500,
+          "help": "Cap the population read."
+        }
+      }
+    },
+    {
+      "id": "access.review_pack",
+      "title": "Access review pack",
+      "provider": "okta",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "The standing access report an access review asks for: one row per person covering what they can open, which groups grant it, whether they hold standing admin, and how long since they last signed in. Says plainly where admin roles could not be read rather than reporting nobody holds admin.",
+      "side_effects": "none",
+      "input_schema": {
+        "filter": {
+          "type": "string",
+          "required": false,
+          "label": "Population filter",
+          "help": "Okta filter expression. Defaults to active users."
+        },
+        "dormant_days": {
+          "type": "number",
+          "required": false,
+          "default": 90,
+          "help": "Dormancy threshold in days."
+        },
+        "max_users": {
+          "type": "number",
+          "required": false,
+          "default": 200,
+          "help": "Cap the population."
+        }
+      }
+    },
+    {
+      "id": "radius.group_deletion",
+      "title": "Blast radius of a group deletion",
+      "provider": "okta",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "If this group were deleted, exactly who loses which applications, and which group rules would be left pointing at a group that no longer exists. There is no delete command in this module; this exists so the consequence can be seen before somebody does it in the console.",
+      "side_effects": "none",
+      "input_schema": {
+        "group_id": {
+          "type": "string",
+          "required": true,
+          "label": "Group id",
+          "help": "Okta group id."
+        }
+      }
+    },
+    {
+      "id": "custody.audit_pack",
+      "title": "Audit evidence pack",
+      "provider": "okta",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "The evidence bundle, assembled entirely from Okta's own records rather than from anything this module asserts about itself. Carries the log watermark every statement is bounded by, and an explicit list of what the pack is not.",
+      "side_effects": "none",
+      "input_schema": {
+        "since": {
+          "type": "string",
+          "required": false,
+          "label": "Since",
+          "help": "ISO timestamp."
+        },
+        "max_events": {
+          "type": "number",
+          "required": false,
+          "default": 500,
+          "help": "Log events to examine."
+        },
+        "max_users": {
+          "type": "number",
+          "required": false,
+          "default": 200,
+          "help": "Cap the population read."
+        }
+      }
+    },
+    {
+      "id": "plan.reset_factors",
+      "title": "Plan an MFA reset",
+      "provider": "okta",
+      "risk": "high",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Plan a multifactor reset, treated as the account takeover vector it is rather than a routine support action. Between reset and re enrolment a password alone reaches the account, and the preview says so.",
+      "side_effects": "none",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "Okta user id."
+        }
+      }
+    },
+    {
+      "id": "plan.offboard_user",
+      "title": "Plan a full offboarding",
+      "provider": "okta",
+      "risk": "high",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Plan an offboarding as three separately approved applies, ordered so nothing undoes a previous step: revoke live credentials, remove group memberships, then deactivate. Refuses when memberships cannot be read to completion, and names every removal that would also modify a group rule.",
+      "side_effects": "none",
       "input_schema": {
         "user_id": {
           "type": "string",
