@@ -439,6 +439,96 @@ class InputCoercionTests(unittest.TestCase):
         self.assertEqual(handler._int(50, 200, 200), 50)
 
 
+class FingerprintTests(unittest.TestCase):
+    """An approval binds to reviewed state, not to the ids it pointed at."""
+
+    def test_key_order_does_not_change_the_fingerprint(self):
+        a = {"group_id": "g1", "member_ids": ["u1", "u2"]}
+        b = {"member_ids": ["u1", "u2"], "group_id": "g1"}
+        self.assertEqual(handler._fingerprint(a), handler._fingerprint(b))
+
+    def test_any_content_change_changes_the_fingerprint(self):
+        base = {"member_ids": ["u1", "u2"]}
+        self.assertNotEqual(
+            handler._fingerprint(base), handler._fingerprint({"member_ids": ["u1"]})
+        )
+        self.assertNotEqual(
+            handler._fingerprint(base),
+            handler._fingerprint({"member_ids": ["u1", "u2", "u3"]}),
+        )
+
+    def test_member_order_is_significant_so_snapshots_must_sort(self):
+        self.assertNotEqual(
+            handler._fingerprint({"m": ["u1", "u2"]}),
+            handler._fingerprint({"m": ["u2", "u1"]}),
+        )
+
+
+class PlanVerificationTests(unittest.TestCase):
+    SNAPSHOT = {"group_id": "g1", "member_ids": ["u1", "u2"], "member_count": 2}
+
+    def _approved(self):
+        return {
+            "fingerprint": handler._fingerprint(self.SNAPSHOT),
+            "snapshot": self.SNAPSHOT,
+        }
+
+    def test_unchanged_state_allows_the_apply(self):
+        self.assertIsNone(handler.verify_plan(self._approved(), self.SNAPSHOT))
+
+    def test_an_apply_without_a_plan_is_refused(self):
+        with self.assertRaises(handler.AirlockError) as caught:
+            handler.verify_plan({}, self.SNAPSHOT)
+        self.assertEqual(caught.exception.code, "plan_missing")
+
+    def test_a_joiner_since_approval_refuses_and_is_named(self):
+        fresh = dict(self.SNAPSHOT)
+        fresh["member_ids"] = ["u1", "u2", "u3"]
+        fresh["member_count"] = 3
+        refusal = handler.verify_plan(self._approved(), fresh)
+        self.assertIsNotNone(refusal)
+        drift = {d["field"]: d for d in refusal["drifted"]}
+        self.assertEqual(drift["member_ids"]["newly_present"], ["u3"])
+        self.assertEqual(drift["member_count"]["now"], 3)
+
+    def test_a_leaver_since_approval_refuses_and_is_named(self):
+        fresh = dict(self.SNAPSHOT)
+        fresh["member_ids"] = ["u1"]
+        refusal = handler.verify_plan(self._approved(), fresh)
+        drift = {d["field"]: d for d in refusal["drifted"]}
+        self.assertEqual(drift["member_ids"]["no_longer_present"], ["u2"])
+
+    def test_the_refusal_carries_both_fingerprints(self):
+        fresh = dict(self.SNAPSHOT, member_count=99)
+        refusal = handler.verify_plan(self._approved(), fresh)
+        self.assertEqual(refusal["approved_fingerprint"], self._approved()["fingerprint"])
+        self.assertNotEqual(refusal["current_fingerprint"], refusal["approved_fingerprint"])
+
+    def test_a_plan_envelope_carries_everything_an_apply_needs(self):
+        envelope = handler._plan_envelope(
+            "plan.x", "apply.x", {"a": 1}, self.SNAPSHOT, {"preview": True}
+        )
+        for field in ("plan_id", "apply_with", "intent", "snapshot", "fingerprint"):
+            self.assertIn(field, envelope)
+        self.assertEqual(envelope["fingerprint"], handler._fingerprint(self.SNAPSHOT))
+
+    def test_the_plan_pattern_needs_no_storage(self):
+        """The fingerprint travels in the payload, so filesystem_writes stays empty."""
+        envelope = handler._plan_envelope(
+            "plan.x", "apply.x", {"a": 1}, self.SNAPSHOT, {}
+        )
+        round_tripped = json.loads(json.dumps(envelope))
+        self.assertIsNone(
+            handler.verify_plan(
+                {
+                    "fingerprint": round_tripped["fingerprint"],
+                    "snapshot": round_tripped["snapshot"],
+                },
+                self.SNAPSHOT,
+            )
+        )
+
+
 class ManifestTests(unittest.TestCase):
     """The manifest and the handler must not drift apart."""
 

@@ -1417,6 +1417,242 @@ def radius_user_deactivation(inputs, context):
     )
 
 
+def _canonical(value):
+    """Stable JSON so a fingerprint depends on content, never on key order."""
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
+
+
+def _fingerprint(snapshot):
+    return hashlib.sha256(_canonical(snapshot).encode("utf8")).hexdigest()
+
+
+def _plan_envelope(command, apply_with, intent, snapshot, preview, warnings=None):
+    """The whole of the plan and apply contract, and it needs no storage.
+
+    The fingerprint travels out with the plan, a human approves that payload, and
+    the matching apply receives it back and re hashes freshly read state. Nothing
+    is written to disk, so the manifest can honestly keep filesystem_writes empty.
+
+    An approval therefore binds to the state the human reviewed, not to the record
+    ids they were pointed at. Approve a change across forty users, let nine of them
+    move while it sits in a queue, and a naive system writes over state nobody saw.
+    """
+    return {
+        "plan_id": str(uuid.uuid4()),
+        "planned_by": command,
+        "apply_with": apply_with,
+        "intent": intent,
+        "snapshot": snapshot,
+        "fingerprint": _fingerprint(snapshot),
+        "computed_at": _now_iso(),
+        "preview": preview,
+        "warnings": warnings or [],
+    }
+
+
+def verify_plan(inputs, fresh_snapshot):
+    """Re hash freshly read state and refuse if anything moved.
+
+    Returns None when the plan still holds. Returns a refusal envelope naming what
+    changed when it does not. Used by every apply before it touches anything.
+    """
+    approved = inputs.get("fingerprint")
+    if not approved:
+        raise AirlockError(
+            "plan_missing",
+            "This command only runs against an approved plan. Run the matching "
+            "plan command first and pass its fingerprint back.",
+        )
+    current = _fingerprint(fresh_snapshot)
+    if current == approved:
+        return None
+    return {
+        "approved_fingerprint": approved,
+        "current_fingerprint": current,
+        "drifted": _describe_drift(inputs.get("snapshot") or {}, fresh_snapshot),
+        "checked_at": _now_iso(),
+    }
+
+
+def _describe_drift(approved_snapshot, fresh_snapshot):
+    """Name what moved, rather than only reporting that something did."""
+    changes = []
+    keys = set(approved_snapshot) | set(fresh_snapshot)
+    for key in sorted(keys):
+        before = approved_snapshot.get(key)
+        after = fresh_snapshot.get(key)
+        if before == after:
+            continue
+        if isinstance(before, list) and isinstance(after, list):
+            gone = [x for x in before if x not in after]
+            added = [x for x in after if x not in before]
+            changes.append(
+                {"field": key, "no_longer_present": gone, "newly_present": added}
+            )
+        else:
+            changes.append({"field": key, "was": before, "now": after})
+    return changes
+
+
+@_guard("plan.group_membership")
+def plan_group_membership(inputs, context):
+    """Compute a membership change and fingerprint the state it depends on.
+
+    Nothing is written. The result is what a human approves, and the fingerprint
+    is what the matching apply re checks.
+    """
+    group_id = inputs.get("group_id")
+    if not group_id:
+        raise AirlockError("input_missing", "group_id is required.")
+    add = [str(u) for u in (inputs.get("add") or [])]
+    remove = [str(u) for u in (inputs.get("remove") or [])]
+    if not add and not remove:
+        raise AirlockError("input_missing", "Give at least one user to add or remove.")
+
+    client = _client()
+    encoded = urllib.parse.quote(str(group_id))
+    group = _get_one(client, "/groups/" + encoded, "group_not_found")
+    members = _paged(client, "/groups/" + encoded + "/users", {"limit": "200"})
+    if not members["complete"]:
+        raise AirlockError(
+            "set_incomplete",
+            "The group membership could not be read to completion, so a plan over "
+            "it would be built on a partial set. Refusing rather than planning "
+            "against state nobody can see all of.",
+        )
+
+    member_ids = sorted(u.get("id") for u in members["items"] if u.get("id"))
+    member_set = set(member_ids)
+
+    will_add = [u for u in add if u not in member_set]
+    already_there = [u for u in add if u in member_set]
+    will_remove = [u for u in remove if u in member_set]
+    not_a_member = [u for u in remove if u not in member_set]
+
+    warnings = []
+    entanglement = []
+    for user_id in will_remove:
+        report = access_rule_entanglement(
+            {"user_id": user_id, "group_id": group_id}, context
+        )
+        if report.get("status") != "ok":
+            continue
+        detail = report["data"]
+        if detail.get("rule_managed"):
+            entanglement.append(
+                {
+                    "user_id": user_id,
+                    "rules": detail.get("rules"),
+                    "second_order_effect": detail.get("second_order_effect"),
+                    "undo_cost": detail.get("undo_cost"),
+                }
+            )
+
+    if entanglement:
+        warnings.append(
+            str(len(entanglement))
+            + " of these removals will also permanently modify a group rule. Read "
+            "rule_entanglement before approving."
+        )
+    if already_there:
+        warnings.append(
+            str(len(already_there)) + " users named for adding are already members."
+        )
+    if not_a_member:
+        warnings.append(
+            str(len(not_a_member)) + " users named for removal are not members."
+        )
+
+    snapshot = {
+        "group_id": group_id,
+        "member_ids": member_ids,
+        "member_count": len(member_ids),
+    }
+    intent = {"group_id": group_id, "add": will_add, "remove": will_remove}
+    preview = {
+        "group_name": (group.get("profile") or {}).get("name"),
+        "members_now": len(member_ids),
+        "members_after": len(member_ids) + len(will_add) - len(will_remove),
+        "will_add": will_add,
+        "will_remove": will_remove,
+        "no_op_already_member": already_there,
+        "no_op_not_a_member": not_a_member,
+        "rule_entanglement": entanglement,
+    }
+
+    return _ok(
+        "plan.group_membership",
+        _plan_envelope(
+            "plan.group_membership",
+            "apply.group_membership",
+            intent,
+            snapshot,
+            preview,
+            warnings,
+        ),
+        warnings or None,
+    )
+
+
+@_guard("plan.deactivate_user")
+def plan_deactivate_user(inputs, context):
+    """Compute a deactivation, its blast radius, and the state it depends on."""
+    user_id = inputs.get("user_id")
+    if not user_id:
+        raise AirlockError("input_missing", "user_id is required.")
+
+    radius = radius_user_deactivation({"user_id": user_id}, context)
+    if radius.get("status") != "ok":
+        return radius
+    detail = radius["data"]
+    user = detail["user"]
+
+    if user.get("status") == "DEPROVISIONED":
+        raise AirlockError(
+            "already_deactivated",
+            "This user is already deactivated. Nothing to plan.",
+        )
+
+    client = _client()
+    encoded = urllib.parse.quote(str(user_id))
+    groups = _paged(client, "/users/" + encoded + "/groups", {"limit": "200"})
+
+    snapshot = {
+        "user_id": user_id,
+        "status": user.get("status"),
+        "status_changed": user.get("status_changed"),
+        "group_ids": sorted(g.get("id") for g in groups["items"] if g.get("id")),
+        "application_count": detail["lost"]["application_count"],
+    }
+    intent = {"user_id": user_id, "action": "deactivate"}
+    preview = {
+        "user": user,
+        "loses": detail["lost"],
+        "survives": detail["survives"],
+        "groups_left_ownerless": detail["groups_left_ownerless"],
+        "single_off_switch": False,
+    }
+
+    warnings = list(radius.get("warnings") or [])
+    warnings.append(
+        "Deactivation is reversible in Okta, but revoked sessions and tokens are "
+        "not. Consider apply.suspend_user if this may need undoing."
+    )
+
+    return _ok(
+        "plan.deactivate_user",
+        _plan_envelope(
+            "plan.deactivate_user",
+            "apply.deactivate_user",
+            intent,
+            snapshot,
+            preview,
+            warnings,
+        ),
+        warnings,
+    )
+
+
 # The marketplace linter resolves a command id to a function by replacing dots and
 # dashes with underscores. An older publisher FAQ documents an _h_ prefix instead.
 # Both names are bound to the same function so neither loader can miss it.
@@ -1431,3 +1667,5 @@ _h_groups_get_members = groups_get_members
 _h_access_rule_entanglement = access_rule_entanglement
 _h_access_explain = access_explain
 _h_radius_user_deactivation = radius_user_deactivation
+_h_plan_group_membership = plan_group_membership
+_h_plan_deactivate_user = plan_deactivate_user

@@ -1,7 +1,7 @@
 {
   "id": "sakrit204/okta_access_airlock",
   "slug": "sakrit204/okta_access_airlock",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",
   "auth": {
     "type": "oauth2",
@@ -10,7 +10,10 @@
   },
   "license_required": false,
   "requires": {
-    "network": ["*.okta.com", "*.oktapreview.com"],
+    "network": [
+      "*.okta.com",
+      "*.oktapreview.com"
+    ],
     "subprocess": false,
     "filesystem_writes": []
   },
@@ -200,6 +203,46 @@
           "required": true,
           "label": "User id",
           "help": "Okta user id."
+        }
+      }
+    },
+    {
+      "id": "plan.group_membership",
+      "title": "Plan a membership change",
+      "description": "Compute a group membership change without applying it, snapshot and fingerprint the state it depends on, and name every removal that would also permanently modify a group rule. Refuses to plan against a membership it could not read to completion.",
+      "side_effects": "none",
+      "input_schema": {
+        "group_id": {
+          "type": "string",
+          "required": true,
+          "label": "Group id",
+          "help": "The group to change."
+        },
+        "add": {
+          "type": "string",
+          "required": false,
+          "label": "Users to add",
+          "help": "User ids to add. Already present users are reported as no ops."
+        },
+        "remove": {
+          "type": "string",
+          "required": false,
+          "label": "Users to remove",
+          "help": "User ids to remove. Non members are reported as no ops."
+        }
+      }
+    },
+    {
+      "id": "plan.deactivate_user",
+      "title": "Plan a deactivation",
+      "description": "Compute a deactivation with its full blast radius, snapshot and fingerprint the state it depends on, and recommend suspension instead where the change may need undoing. Nothing is written.",
+      "side_effects": "none",
+      "input_schema": {
+        "user_id": {
+          "type": "string",
+          "required": true,
+          "label": "User id",
+          "help": "The user to plan a deactivation for."
         }
       }
     }

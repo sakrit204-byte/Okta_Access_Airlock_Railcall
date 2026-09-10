@@ -56,14 +56,43 @@ role assignments against System Log activity. No CSV export can do it, at any te
 **3. A signed evidence trail.** Not a report you assemble, a chain you can verify
 offline months later, including every action the module refused.
 
+## How a change gets approved
+
+Every write has a planning twin. The plan reads current state, computes exactly what
+would change, and **fingerprints the state the change depends on**. A human approves that
+payload. The matching apply receives the fingerprint back, re reads, re hashes, and
+**refuses if anything moved**, naming what moved.
+
+```
+plan                          approval              apply
+----                          --------              -----
+read current state
+compute the change
+hash the affected state
+return a fingerprint    ->    a human reviews  ->   re read, re hash, compare
+                              the payload             match  -> execute
+                                                      drift  -> refuse and name it
+```
+
+So an approval binds to **the state the human reviewed**, not to the record ids they were
+pointed at. Approve a change across forty users, let nine of them move while it sits in a
+queue, and a naive system writes over state nobody saw. This one stops.
+
+The fingerprint travels inside the approved payload, so none of this needs storage. That
+is why `filesystem_writes` can honestly stay empty.
+
 ## Status
 
-Early and honest about it. The foundation is in place and passes the marketplace publish
-gate. Two of the planned thirty six commands are implemented.
+Early, and specific about where it is.
+
+**13 of 36 commands implemented.** Authentication and every read are verified against a
+live Okta org, not against mocks. 57 offline tests. The bundle passes the marketplace
+publish gate with zero errors and zero warnings.
+
+Not built yet: the apply commands, the custody group, and the companion workflow.
 
 `docs/LIMITATIONS.md` is kept current as the module is built rather than written at the
-end, and it already records four specific Okta behaviours that constrain what this
-module can claim.
+end. It records nine things this module cannot do, most of them discovered by running it.
 
 ## Quick start
 
@@ -145,6 +174,18 @@ read scoped token still could not deactivate anybody.**
 Okta itself recommends against static API tokens. This module does not support them, on
 purpose.
 
+There is a third boundary, and we did not plan it. Current Okta orgs require **DPoP**
+(RFC 9449) on the token endpoint, which binds the access token to a proof key. Okta
+offers a switch to turn that requirement off. This module does not ask you to use it. A
+token lifted from a log, a crash dump or a process listing cannot be replayed without the
+private key that minted it, and a bearer token cannot express that.
+
+```
+ring 3   DPoP proof key        a stolen token is useless without the key
+ring 2   OAuth scope grant     the token cannot deactivate without okta.users.manage
+ring 1   the RailCall airlock  and even then, a human approves the call
+```
+
 ## Trust surface
 
 * Credentials resolve through the Station vault only. This module never reads a
@@ -161,7 +202,35 @@ purpose.
 
 ## Command surface
 
-Two implemented today. The planned surface is thirty six, in six groups:
+### Implemented and verified live
+
+**Posture**
+* `org.verify_connection` probes every granted scope and names each missing one
+  alongside the exact commands it blocks
+* `org.rate_budget` reports remaining headroom per bucket, read from Okta's own
+  response headers rather than from documentation
+
+**Discovery**
+* `users.find` filter based. A search result is marked advisory and carries
+  `may_feed_write: false`, because Okta serves search from an eventually consistent
+  datasource and a plan built on it can target state the approver never saw
+* `users.get`, `users.list_access`, `users.list_live_credentials`
+* `groups.find`, `groups.get_members`, both paged to completion
+
+**Blast radius and access**
+* `radius.user_deactivation` leads with what **survives** a deactivation, not what
+  breaks, and names any group left with no owner
+* `access.explain` answers why a user can reach an application: direct, through which
+  group, or through which rule
+* `access.rule_entanglement` reports whether removing a membership would also
+  permanently modify a group rule
+
+**Plan**
+* `plan.group_membership`, `plan.deactivate_user`
+
+### Still to come
+
+The planned surface is thirty six, in six groups:
 
 * **Posture and connection.** Scope probing, org description, standing admin inventory,
   rate limit headroom.
