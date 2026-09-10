@@ -1,0 +1,181 @@
+{
+  "id": "sakrit204/quarterly_access_review",
+  "title": "Quarterly Access Review, airlocked",
+  "context": {
+    "population_filter": "status eq \"ACTIVE\"",
+    "review_dormant_days": 90,
+    "review_population_limit": 200,
+    "posture_dormant_days": 180,
+    "posture_scan_limit": 500,
+    "evidence_sample_limit": 100,
+    "revoke_group_id": "",
+    "revoke_user_ids": []
+  },
+  "nodes": [
+    {
+      "id": "scopes",
+      "type": "effect",
+      "action_id": "org_verify_connection",
+      "args": {}
+    },
+    {
+      "id": "gate_scopes",
+      "type": "transform",
+      "input_from": "{{nodes.scopes.data}}",
+      "code": "blocked = (input or {}).get('blocked_commands') or []\nneeded = ['users.find', 'access.review_pack', 'custody.detect_ungoverned']\nmissing = [c for c in needed if c in blocked]\noutput = {'ok': not missing, 'missing_scopes_block': missing, 'granted': (input or {}).get('scopes_granted'), 'reason': 'A review that silently skips a section is worse than one that refuses to start.' if missing else 'All sections available.'}"
+    },
+    {
+      "id": "budget",
+      "type": "effect",
+      "action_id": "org_rate_budget",
+      "args": {},
+      "cond": "{{nodes.gate_scopes.ok}}"
+    },
+    {
+      "id": "gate_budget",
+      "type": "transform",
+      "input_from": "{{nodes.budget.data}}",
+      "code": "buckets = (input or {}).get('buckets') or {}\nlow = [b for b, v in buckets.items() if (v or {}).get('remaining') is not None and v['remaining'] < 25]\noutput = {'ok': not low, 'low_buckets': low, 'reason': 'Starting a review that cannot finish leaves a half read population that looks complete.' if low else 'Enough headroom to finish.'}"
+    },
+    {
+      "id": "posture",
+      "type": "effect",
+      "action_id": "org_describe",
+      "args": {
+        "dormant_days": "{{ctx.posture_dormant_days}}",
+        "max_users": "{{ctx.posture_scan_limit}}"
+      },
+      "cond": "{{nodes.gate_budget.ok}}"
+    },
+    {
+      "id": "review",
+      "type": "effect",
+      "action_id": "access_review_pack",
+      "args": {
+        "filter": "{{ctx.population_filter}}",
+        "dormant_days": "{{ctx.review_dormant_days}}",
+        "max_users": "{{ctx.review_population_limit}}"
+      },
+      "cond": "{{nodes.gate_budget.ok}}"
+    },
+    {
+      "id": "ungoverned",
+      "type": "effect",
+      "action_id": "custody_detect_ungoverned",
+      "args": {},
+      "cond": "{{nodes.gate_budget.ok}}"
+    },
+    {
+      "id": "candidates",
+      "type": "transform",
+      "input_from": "{{nodes.review.data}}",
+      "code": "rows = (input or {}).get('rows') or []\ndormant = [r for r in rows if r.get('dormant') or r.get('never_signed_in')]\nadmin_unknown = [r for r in rows if r.get('admin_roles_available') is False]\nstanding_admin = [r for r in rows if r.get('holds_standing_admin')]\noutput = {'reviewed': len(rows), 'complete': (input or {}).get('complete'), 'dormant': [{'id': r['user']['id'], 'login': r['user']['login'], 'days': r.get('days_since_login'), 'apps': r.get('application_count')} for r in dormant], 'dormant_count': len(dormant), 'standing_admin_count': len(standing_admin), 'admin_visibility_gap': len(admin_unknown)}"
+    },
+    {
+      "id": "revocation_plan",
+      "type": "transform",
+      "input_from": "{{nodes.candidates.dormant}}",
+      "code": "items = input or []\noutput = {'proposed': [i['id'] for i in items], 'count': len(items), 'note': 'Proposed only. Nothing here is removed by this workflow; the removals below run only for user ids a human puts in the run context.'}"
+    },
+    {
+      "id": "plan_removal",
+      "type": "effect",
+      "action_id": "plan_group_membership",
+      "args": {
+        "group_id": "{{ctx.revoke_group_id}}",
+        "remove": "{{ctx.revoke_user_ids}}"
+      },
+      "cond": "{{ctx.revoke_group_id}}"
+    },
+    {
+      "id": "apply_removal",
+      "type": "effect",
+      "action_id": "apply_group_membership",
+      "args": {
+        "fingerprint": "{{nodes.plan_removal.data.fingerprint}}",
+        "intent": "{{nodes.plan_removal.data.intent}}",
+        "snapshot": "{{nodes.plan_removal.data.snapshot}}"
+      },
+      "cond": "{{ctx.revoke_group_id}}"
+    },
+    {
+      "id": "reconcile",
+      "type": "transform",
+      "input_from": "{{nodes.apply_removal.data}}",
+      "code": "counts = ((input or {}).get('counts') or {})\noutput = {'landed': counts.get('landed', 0), 'failed': counts.get('failed', 0), 'unresolved': counts.get('unresolved', 0), 'all_landed': (input or {}).get('all_landed'), 'note': 'An unresolved write raises before reaching here, so seeing this node at all means no outcome was left unknown.'}"
+    },
+    {
+      "id": "pack",
+      "type": "effect",
+      "action_id": "custody_audit_pack",
+      "args": {
+        "max_users": "{{ctx.evidence_sample_limit}}"
+      },
+      "cond": "{{nodes.gate_budget.ok}}"
+    },
+    {
+      "id": "claim",
+      "type": "transform",
+      "input_from": "{{nodes.pack.data}}",
+      "code": "pack = input or {}\nchanges = (pack.get('access_changes') or {})\ncounts = changes.get('counts') or {}\nungoverned = counts.get('ungoverned', 0)\nsystem = counts.get('system', 0)\ngoverned = counts.get('governed', 0)\nif ungoverned:\n    verdict = 'contested'\n    why = str(ungoverned) + ' access changes were visible with no governed approval behind them.'\nelif governed and not system:\n    verdict = 'governed'\n    why = 'Every visible access change was made through the module.'\nelif governed or system:\n    verdict = 'partial'\n    why = 'Visible changes are a mix of governed and Okta system originated. Okta attributes some console actions to its own system principal, so this is not proof that no person acted.'\nelse:\n    verdict = 'unproven'\n    why = 'No access change was visible in the window read. That is not evidence that none occurred.'\noutput = {'custody': verdict, 'why': why, 'log_watermark': pack.get('log_watermark'), 'log_read_complete': pack.get('log_read_complete'), 'bounded_by': 'Okta publishes no maximum System Log delivery latency, so every statement above is bounded by the watermark and never claims absence.'}"
+    }
+  ],
+  "edges": [
+    {
+      "from": "scopes",
+      "to": "gate_scopes"
+    },
+    {
+      "from": "gate_scopes",
+      "to": "budget"
+    },
+    {
+      "from": "budget",
+      "to": "gate_budget"
+    },
+    {
+      "from": "gate_budget",
+      "to": "posture"
+    },
+    {
+      "from": "gate_budget",
+      "to": "review"
+    },
+    {
+      "from": "gate_budget",
+      "to": "ungoverned"
+    },
+    {
+      "from": "review",
+      "to": "candidates"
+    },
+    {
+      "from": "candidates",
+      "to": "revocation_plan"
+    },
+    {
+      "from": "revocation_plan",
+      "to": "plan_removal"
+    },
+    {
+      "from": "plan_removal",
+      "to": "apply_removal"
+    },
+    {
+      "from": "apply_removal",
+      "to": "reconcile"
+    },
+    {
+      "from": "ungoverned",
+      "to": "pack"
+    },
+    {
+      "from": "posture",
+      "to": "pack"
+    },
+    {
+      "from": "pack",
+      "to": "claim"
+    }
+  ]
+}
