@@ -837,3 +837,79 @@ def _unb64(segment):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ActionIdDerivation(unittest.TestCase):
+    """The station keys workflow nodes by an action id it derives itself.
+
+    Copied from `workbench/routes/modules.py::_module_provider_verb`. If our tools
+    derive it differently, a workflow can pass every gate and still resolve to the
+    wrong command, or to no command, at run time. That has happened once already.
+    """
+
+    @staticmethod
+    def station_derivation(command, slug):
+        cid = command["id"]
+        parts = cid.split(".", 1)
+        provider = command.get("provider") or (parts[0] if len(parts) == 2 else slug)
+        verb = (parts[1] if len(parts) == 2 else cid).replace(".", "_")
+        return provider + "_" + verb
+
+    def setUp(self):
+        root = pathlib.Path(__file__).resolve().parent.parent
+        self.manifest = json.loads((root / "module.json").read_text(encoding="utf8"))
+        self.workflow = json.loads(
+            (root / "workflow" / "quarterly_access_review.json").read_text(encoding="utf8")
+        )
+        self.slug = str(self.manifest.get("id", "")).split("/")[-1]
+        tools = str(root / "tools")
+        if tools not in sys.path:
+            sys.path.insert(0, tools)
+
+    def test_our_tools_agree_with_the_station(self):
+        import check_workflow
+
+        for command in self.manifest["commands"]:
+            self.assertEqual(
+                check_workflow.action_id(command, self.slug),
+                self.station_derivation(command, self.slug),
+                "check_workflow disagrees with the station on " + command["id"],
+            )
+
+    def test_a_per_command_provider_override_is_honoured(self):
+        """The field is absent today. It was present once, and collapsed plan onto apply."""
+        plan = {"id": "plan.group_membership", "provider": "okta"}
+        apply_ = {"id": "apply.group_membership", "provider": "okta"}
+        self.assertEqual(
+            self.station_derivation(plan, self.slug),
+            self.station_derivation(apply_, self.slug),
+            "the override is what made these collide; if this stops being true "
+            "the derivation has changed and the tools need rechecking",
+        )
+        import check_workflow
+
+        self.assertEqual(
+            check_workflow.action_id(plan, self.slug),
+            check_workflow.action_id(apply_, self.slug),
+            "check_workflow must reproduce the collision, not hide it",
+        )
+
+    def test_no_two_commands_share_an_action_id(self):
+        seen = {}
+        for command in self.manifest["commands"]:
+            seen.setdefault(
+                self.station_derivation(command, self.slug), []
+            ).append(command["id"])
+        clashes = {a: ids for a, ids in seen.items() if len(ids) > 1}
+        self.assertEqual(clashes, {}, "action id collision: " + repr(clashes))
+
+    def test_every_workflow_node_resolves_to_a_real_command(self):
+        ours = {
+            self.station_derivation(c, self.slug) for c in self.manifest["commands"]
+        }
+        for node in self.workflow["nodes"]:
+            action = node.get("action_id")
+            if action:
+                self.assertIn(
+                    action, ours, node["id"] + " points at an action nothing provides"
+                )

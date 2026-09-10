@@ -23,10 +23,29 @@ LINT_URL = "https://railcall-marketplace-lggm.onrender.com/listings/lint"
 DUPLICATE_ARG_THRESHOLD = 20
 
 
-def action_id(command_id):
-    parts = command_id.split(".", 1)
-    provider = parts[0] if len(parts) == 2 else command_id
-    verb = (parts[1] if len(parts) == 2 else command_id).replace(".", "_")
+def action_id(command, slug):
+    """Derive the action id the station will key this command by.
+
+    Copied from the station's own `_module_provider_verb`, in
+    `workbench/routes/modules.py`. Two things about it matter and both have
+    bitten already.
+
+    A per command `provider` field OVERRIDES the prefix. Setting `provider:
+    okta` on every command once made `plan.group_membership` and
+    `apply.group_membership` both resolve to `okta_group_membership`, so the
+    plan and its apply became the same action. An earlier version of this
+    function ignored that field, which meant the gate agreed with the manifest
+    while the station disagreed, and it would have passed the exact defect it
+    exists to catch.
+
+    Remaining dots become underscores, so `probe.foo_bar` and `probe.foo.bar`
+    also collide. `tools/station_check.py` is what refuses collisions; this
+    function only has to derive the same id the station would.
+    """
+    cid = command["id"]
+    parts = cid.split(".", 1)
+    provider = command.get("provider") or (parts[0] if len(parts) == 2 else slug)
+    verb = (parts[1] if len(parts) == 2 else cid).replace(".", "_")
     return provider + "_" + verb
 
 
@@ -37,7 +56,8 @@ def main():
     manifest = json.loads((ROOT / "module.json").read_text(encoding="utf8"))
     description = (ROOT / "docs" / "workflow_description.txt").read_text(encoding="utf8").strip()
 
-    ours = {action_id(c["id"]) for c in manifest["commands"]}
+    slug = str(manifest.get("id", "")).split("/")[-1]
+    ours = {action_id(c, slug) for c in manifest["commands"]}
     nodes = spec["nodes"]
     ids = {n["id"] for n in nodes}
     problems = []
