@@ -1,0 +1,27 @@
+# What must never leave this machine.
+#
+# .gitignore does NOT apply here. The publisher walks the module directory with
+# its own default list, and .gitignore is itself on that list, so it is never
+# even read. Without this file, `railcall market module sign .` signed 24 files
+# including .secrets/okta.json, which holds the Okta private key, and
+# .secrets/marketplace_publisher.backup.json, which holds the publisher signing
+# seed. Publishing would have uploaded both.
+#
+# tools/check_publishable.py fails the build if anything below reappears in the
+# signed tree, because a rule nobody checks lasts until the next hurried edit.
+
+.secrets/
+secrets/
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+keys.local.json
+live_findings*.json
+.venv/
+venv/
+env/
+.vscode/
+.idea/
+Thumbs.db

@@ -1,6 +1,6 @@
 name: ci
 
-# Five gates, because passing one says nothing about the others. Two of these
+# Six gates, because passing one says nothing about the others. Two of these
 # were added after a gate we already had let a real defect through: the listing
 # gate accepted a manifest the station could not load, and the station loaded a
 # handler the listing gate rejected.
@@ -10,6 +10,7 @@ name: ci
 #   check_parity    manifest, handler, listing and README all agree
 #   lint_listing    the marketplace will accept the module
 #   check_workflow  the marketplace will accept the workflow
+#   check_publishable  no credential reaches the tree that gets uploaded
 
 on:
   push:
@@ -44,3 +45,6 @@ jobs:
 
       - name: Marketplace publish gate, workflow
         run: python tools/check_workflow.py
+
+      - name: Nothing secret reaches the published tree
+        run: python tools/check_publishable.py

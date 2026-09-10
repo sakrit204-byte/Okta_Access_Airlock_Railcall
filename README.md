@@ -287,12 +287,21 @@ python tools/station_check.py        the station's real loading contract
 python tools/check_parity.py         manifest, handler and listing agree
 python tools/lint_listing.py         the marketplace publish gate
 python tools/check_workflow.py       the workflow publish gate
+python tools/check_publishable.py    nothing secret reaches the published tree
 python tools/live_probe.py           read only probe of a real org
 ```
 
-All five run in CI on every push. They check different things and passing one says
+The first six run in CI on every push. They check different things and passing one says
 nothing about the others: the listing gate accepted a manifest the station could not
-load, and the station loaded a handler the listing gate rejected.
+load, the station loaded a handler the listing gate rejected, and the workflow gate
+derived action ids the station would not have resolved.
+
+`check_publishable.py` earns its place separately. `.gitignore` does not govern what gets
+uploaded: the publisher walks the module directory with its own ignore list, on which
+`.gitignore` itself sits, so it is never read. Before `.moduleignore` existed the signed
+tree included the local credential file. The check refuses on two independent grounds, by
+path and by file content, because a list of paths goes stale and a secret in an
+unexpected file is exactly what a list misses.
 
 ***
 
