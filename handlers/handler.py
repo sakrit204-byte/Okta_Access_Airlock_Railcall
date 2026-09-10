@@ -825,36 +825,64 @@ def _next_link(headers):
 def _paged(client, path, query=None, cap=1000):
     """Read a collection to completion, or stop honestly at the cap.
 
-    Never returns a partially read set without saying so. A half reported set is
-    worse than no set, because a plan built on it looks complete.
-    """
-    items = []
-    status, headers, body = client.request("GET", path, query=query)
-    if status >= 400:
-        raise AirlockError(
-            "provider_refused",
-            "Okta refused a read of " + path + ".",
-            {"http_status": status, "provider_message": _provider_message(body)},
-        )
-    if isinstance(body, list):
-        items.extend(body)
+    Okta signals further pages with an RFC 5988 Link header, but it does not
+    always send one when more records exist. Measured on a live org: /groups with
+    limit=1 over two groups returns one record and only rel="self". A reader that
+    trusts the Link header alone therefore truncates silently and reports the set
+    as complete, which is the worst possible failure here because a plan built on
+    a short set looks fine.
 
-    next_url = _next_link(headers)
-    while next_url and len(items) < cap:
-        _assert_allowed(next_url, client.host)
-        parts = urllib.parse.urlsplit(next_url)
-        relative = parts.path.split(API_PREFIX, 1)[-1]
-        follow_query = dict(urllib.parse.parse_qsl(parts.query))
-        status, headers, body = client.request("GET", relative, query=follow_query)
-        if status >= 400 or not isinstance(body, list):
+    So the Link header is the fast path, and a full page with no next link is
+    treated as "ask again" using an explicit after cursor, which was verified to
+    keep working where the Link header stops.
+    """
+    query = dict(query or {})
+    limit = _int(query.get("limit"), 200)
+    items = []
+    seen_cursors = set()
+    truncated = False
+
+    while True:
+        status, headers, body = client.request("GET", path, query=query)
+        if status >= 400:
+            raise AirlockError(
+                "provider_refused",
+                "Okta refused a read of " + path + ".",
+                {"http_status": status, "provider_message": _provider_message(body)},
+            )
+        page = body if isinstance(body, list) else []
+        items.extend(page)
+
+        if len(items) >= cap:
+            truncated = True
             break
-        items.extend(body)
+
         next_url = _next_link(headers)
+        if next_url:
+            _assert_allowed(next_url, client.host)
+            parts = urllib.parse.urlsplit(next_url)
+            path = parts.path.split(API_PREFIX, 1)[-1]
+            query = dict(urllib.parse.parse_qsl(parts.query))
+            continue
+
+        # No next link. A short page means genuinely finished; a full one does
+        # not, because Okta omits the link even when more records remain.
+        if len(page) < limit:
+            break
+
+        cursor = page[-1].get("id") if page else None
+        if not cursor or cursor in seen_cursors:
+            # Cannot advance safely. Refuse to claim the set is complete rather
+            # than guess, since a wrong complete flag is what corrupts a plan.
+            truncated = True
+            break
+        seen_cursors.add(cursor)
+        query["after"] = cursor
 
     return {
         "items": items[:cap],
         "count": len(items[:cap]),
-        "complete": next_url is None or len(items) < cap,
+        "complete": not truncated,
         "cap": cap,
     }
 

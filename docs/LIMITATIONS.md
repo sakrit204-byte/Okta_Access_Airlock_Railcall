@@ -39,6 +39,35 @@ specific membership, so the preview can name the rule before anything happens ra
 than discovering it afterwards. A removal that would modify a rule says so in the
 approval, with the number of other members affected.
 
+## 2b. Okta omits the next page link even when more records exist
+
+**verified**
+
+Okta signals further pages with an RFC 5988 Link header. It does not always send one.
+Measured on a live org:
+
+```
+GET /api/v1/groups?limit=1     2 groups exist
+  -> 1 record returned
+  -> Link: <...groups?limit=1>; rel="self"      and nothing else
+```
+
+There is no `rel="next"`, so a reader that trusts the Link header alone collects one of
+two records **and reports the set as complete**. That is the worst shape this failure can
+take. A short set that announces itself is an inconvenience; a short set that claims to
+be whole silently corrupts any plan built on top of it, and the plan looks fine.
+
+This module had exactly that bug until it was measured.
+
+**What this module does.** The Link header is the fast path. A page that comes back
+**full** with no next link is treated as "ask again", using an explicit `after` cursor
+built from the last record id, which was verified to keep returning records where the
+Link header had stopped. A page that comes back **short** is genuinely the end. Where the
+reader cannot advance safely, because a record carries no id or a cursor repeats, it
+reports the set as incomplete rather than guessing.
+
+So `complete: true` means the set was read to the end. It is never a default.
+
 ## 3. The System Log has no guaranteed maximum latency
 
 **documented**
@@ -159,10 +188,11 @@ This module is developed against an Okta Integrator Free Plan org, which caps at
 active users. That is enough to exercise every code path, and it is not enough to
 demonstrate behaviour at scale.
 
-Paging is therefore tested by lowering the page size until a set spans several pages,
-which proves the paging logic but not that a directory of several thousand users
-behaves the same way. Rate limit accounting reads Okta's own response headers, so it
-should hold at any size, but that has been reasoned about rather than observed under
+Paging is proven against a real multi page response by lowering the page size until a
+set spans pages, which is how the truncation bug in section 2 was found. What that does
+not prove is behaviour across a directory of several thousand users. Rate limit
+accounting reads Okta's own response headers, so it should hold at any size, but that has
+been reasoned about rather than observed under
 real pressure.
 
 Where a claim in this repository depends on scale that was never run, it says so. No

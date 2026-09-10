@@ -452,6 +452,45 @@ class PagingTests(unittest.TestCase):
             handler._paged(client, "/users")
         self.assertEqual(caught.exception.code, "provider_refused")
 
+    def test_a_full_page_with_no_next_link_keeps_asking(self):
+        """Okta omits the Link header even when more records exist.
+
+        Measured live: /groups with limit=1 over two groups returns one record
+        and only rel="self". Trusting the Link header alone truncates silently
+        and then reports the set as complete, which is the worst outcome here.
+        """
+        client = FakeClient(
+            [
+                _page([{"id": "1"}]),
+                _page([{"id": "2"}]),
+                _page([]),
+            ]
+        )
+        result = handler._paged(client, "/groups", {"limit": "1"})
+        self.assertEqual(result["count"], 2)
+        self.assertTrue(result["complete"])
+        self.assertEqual(client.calls[1][2].get("after"), "1")
+        self.assertEqual(client.calls[2][2].get("after"), "2")
+
+    def test_a_short_page_with_no_next_link_is_genuinely_complete(self):
+        client = FakeClient([_page([{"id": "1"}])])
+        result = handler._paged(client, "/groups", {"limit": "10"})
+        self.assertEqual(result["count"], 1)
+        self.assertTrue(result["complete"])
+        self.assertEqual(len(client.calls), 1)
+
+    def test_a_cursor_that_cannot_advance_refuses_to_claim_completeness(self):
+        """A record with no id leaves nowhere to continue from."""
+        client = FakeClient([_page([{"name": "no id here"}])])
+        result = handler._paged(client, "/groups", {"limit": "1"})
+        self.assertFalse(result["complete"])
+
+    def test_a_repeating_cursor_stops_rather_than_looping(self):
+        client = FakeClient([_page([{"id": "1"}]), _page([{"id": "1"}])])
+        result = handler._paged(client, "/groups", {"limit": "1"})
+        self.assertFalse(result["complete"])
+        self.assertLessEqual(len(client.calls), 2)
+
     def test_a_next_page_off_the_allowed_host_is_refused(self):
         client = FakeClient(
             [_page([{"id": "1"}], "https://evil.example.com/api/v1/users?after=1")]
