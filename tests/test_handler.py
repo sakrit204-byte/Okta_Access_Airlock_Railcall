@@ -602,6 +602,86 @@ class PlanVerificationTests(unittest.TestCase):
         )
 
 
+class CustodyTests(unittest.TestCase):
+    """Who made a change, and does it count as governed."""
+
+    OURS = "0oaOurServiceApp"
+
+    def _event(self, actor_type, actor_id=None, alt=None):
+        return {
+            "eventType": "group.user_membership.remove",
+            "published": "2026-09-10T09:00:00.000Z",
+            "actor": {"type": actor_type, "id": actor_id, "alternateId": alt},
+            "outcome": {"result": "SUCCESS"},
+        }
+
+    def test_our_own_service_app_is_governed(self):
+        verdict, _ = handler._classify_actor(
+            self._event("PublicClientApp", self.OURS), self.OURS
+        )
+        self.assertEqual(verdict, "governed")
+
+    def test_a_person_is_ungoverned(self):
+        verdict, _ = handler._classify_actor(
+            self._event("User", "00uSomeone", "admin@example.com"), self.OURS
+        )
+        self.assertEqual(verdict, "ungoverned")
+
+    def test_another_integration_is_ungoverned(self):
+        verdict, _ = handler._classify_actor(
+            self._event("PublicClientApp", "0oaSomethingElse"), self.OURS
+        )
+        self.assertEqual(verdict, "ungoverned")
+
+    def test_okta_itself_is_system_not_ungoverned(self):
+        verdict, _ = handler._classify_actor(
+            self._event("SystemPrincipal", "spr1", "system@okta.com"), self.OURS
+        )
+        self.assertEqual(verdict, "system")
+
+    def test_an_unattributable_event_is_unproven_not_governed(self):
+        verdict, _ = handler._classify_actor({"actor": {}}, self.OURS)
+        self.assertEqual(verdict, "unproven")
+
+    def test_an_unknown_client_id_never_reads_as_governed(self):
+        """A missing client id must not make everything look like ours."""
+        verdict, _ = handler._classify_actor(
+            self._event("PublicClientApp", None), None
+        )
+        self.assertNotEqual(verdict, "governed")
+
+    def test_the_event_filter_names_every_access_change_type(self):
+        expression = handler._access_event_filter()
+        for event_type in handler.ACCESS_CHANGE_EVENTS:
+            self.assertIn(event_type, expression)
+        self.assertIn(" or ", expression)
+
+    def test_a_thinned_event_keeps_attribution_and_drops_nothing_needed(self):
+        thin = handler._thin_event(
+            self._event("User", "00uSomeone", "admin@example.com"), self.OURS
+        )
+        for field in ("event_type", "published", "verdict", "reason", "actor",
+                      "client_ip", "outcome", "targets"):
+            self.assertIn(field, thin)
+        self.assertEqual(thin["actor"]["identifier"], "admin@example.com")
+
+
+class LogCursorTests(unittest.TestCase):
+    def test_the_pager_advances_the_log_on_uuid_not_id(self):
+        """System Log records carry uuid. A pager that only knows id stalls."""
+        client = FakeClient(
+            [
+                _page([{"uuid": "e1", "eventType": "x"}]),
+                _page([{"uuid": "e2", "eventType": "x"}]),
+                _page([]),
+            ]
+        )
+        result = handler._paged(client, "/logs", {"limit": "1"})
+        self.assertEqual(result["count"], 2)
+        self.assertTrue(result["complete"])
+        self.assertEqual(client.calls[1][2].get("after"), "e1")
+
+
 class ManifestTests(unittest.TestCase):
     """The manifest and the handler must not drift apart."""
 

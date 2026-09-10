@@ -870,7 +870,11 @@ def _paged(client, path, query=None, cap=1000):
         if len(page) < limit:
             break
 
-        cursor = page[-1].get("id") if page else None
+        # Collections identify records by "id". The System Log uses "uuid",
+        # so a pager that only knows about "id" cannot advance the log at all
+        # and quietly reports every read of it as incomplete.
+        last = page[-1] if page else {}
+        cursor = last.get("id") or last.get("uuid")
         if not cursor or cursor in seen_cursors:
             # Cannot advance safely. Refuse to claim the set is complete rather
             # than guess, since a wrong complete flag is what corrupts a plan.
@@ -1740,6 +1744,269 @@ def plan_deactivate_user(inputs, context):
     )
 
 
+# Events that change who can reach what. Anything not in here is noise for the
+# purposes of custody: sign ins, policy evaluations, session lifecycle.
+ACCESS_CHANGE_EVENTS = (
+    "user.lifecycle.create",
+    "user.lifecycle.activate",
+    "user.lifecycle.deactivate",
+    "user.lifecycle.suspend",
+    "user.lifecycle.unsuspend",
+    "user.lifecycle.delete",
+    "user.lifecycle.delete.initiated",
+    "user.account.privilege.grant",
+    "user.account.privilege.revoke",
+    "user.account.update_profile",
+    "user.mfa.factor.reset_all",
+    "user.mfa.factor.deactivate",
+    "user.session.clear",
+    "group.user_membership.add",
+    "group.user_membership.remove",
+    "group.lifecycle.create",
+    "group.lifecycle.delete",
+    "group.rule.lifecycle.create",
+    "group.rule.lifecycle.delete",
+    "group.rule.lifecycle.activate",
+    "group.rule.lifecycle.deactivate",
+    "application.user_membership.add",
+    "application.user_membership.remove",
+    "application.lifecycle.delete",
+)
+
+# actor.type as Okta reports it, mapped to what it means for custody.
+HUMAN_ACTOR_TYPES = ("User",)
+SYSTEM_ACTOR_TYPES = ("SystemPrincipal",)
+
+
+def _classify_actor(event, our_client_id):
+    """Who made this change, and does it count as governed?
+
+    A change made through this module carries the service application as its
+    actor, so a governed change is distinguishable from a human in the console
+    without needing any record of our own.
+    """
+    actor = event.get("actor") or {}
+    actor_type = actor.get("type")
+    actor_id = actor.get("id")
+
+    if actor_id and our_client_id and actor_id == our_client_id:
+        return "governed", "Made by this module's service application."
+    if actor_type in HUMAN_ACTOR_TYPES:
+        return "ungoverned", "Made by a person, outside this module."
+    if actor_type in SYSTEM_ACTOR_TYPES:
+        return "system", "Made by Okta itself, for example a group rule evaluating."
+    if actor_type:
+        return "ungoverned", (
+            "Made by another integration or application, outside this module."
+        )
+    return "unproven", "The event carries no actor this module can attribute."
+
+
+def _thin_event(event, our_client_id):
+    verdict, reason = _classify_actor(event, our_client_id)
+    actor = event.get("actor") or {}
+    client = event.get("client") or {}
+    target = event.get("target") or []
+    return {
+        "event_type": event.get("eventType"),
+        "published": event.get("published"),
+        "verdict": verdict,
+        "reason": reason,
+        "actor": {
+            "id": actor.get("id"),
+            "type": actor.get("type"),
+            "name": actor.get("displayName"),
+            "identifier": actor.get("alternateId"),
+        },
+        "client_ip": client.get("ipAddress"),
+        "outcome": (event.get("outcome") or {}).get("result"),
+        "targets": [
+            {
+                "id": t.get("id"),
+                "type": t.get("type"),
+                "name": t.get("displayName"),
+                "identifier": t.get("alternateId"),
+            }
+            for t in target
+        ],
+    }
+
+
+def _access_event_filter():
+    """Ask Okta for only the events that change access.
+
+    Scanning and filtering here instead would burn the /logs budget, which this
+    org measures at sixty calls a minute, on token grants and sign ins.
+    """
+    return " or ".join('eventType eq "' + e + '"' for e in ACCESS_CHANGE_EVENTS)
+
+
+def _read_access_events(client, since=None, cap=500):
+    query = {
+        "limit": "100",
+        "sortOrder": "DESCENDING",
+        "filter": _access_event_filter(),
+    }
+    if since:
+        query["since"] = str(since)
+    page = _paged(client, "/logs", query, cap)
+    relevant = [
+        e
+        for e in page["items"]
+        if str(e.get("eventType") or "") in ACCESS_CHANGE_EVENTS
+    ]
+
+    # The watermark is how far the log is known to reach, so it must come from
+    # the log as a whole and not from the filtered slice. An access change is
+    # rare; a filtered read could be hours stale while the log is current, and
+    # reporting the stale figure would overstate what "not visible" covers.
+    watermark = None
+    try:
+        _s, _h, newest = client.request(
+            "GET", "/logs", query={"limit": "1", "sortOrder": "DESCENDING"}
+        )
+        if isinstance(newest, list) and newest:
+            watermark = newest[0].get("published")
+    except AirlockError:
+        watermark = None
+
+    return relevant, page, watermark
+
+
+@_guard("custody.detect_ungoverned")
+def custody_detect_ungoverned(inputs, context):
+    """Find access changes with no governed approval behind them.
+
+    This is the command that catches somebody going around the airlock. It reads
+    Okta's own System Log rather than any record this module keeps, which is the
+    point: a record we wrote about ourselves is the kind of evidence an auditor
+    discounts.
+
+    What it can never say is that no ungoverned change occurred. Okta publishes
+    no maximum System Log delivery latency, so the honest claim is bounded by the
+    watermark this run actually saw, and that bound is returned alongside the
+    result rather than left implied.
+    """
+    creds = _vault_credentials()
+    client = OktaClient(creds)
+    our_client_id = creds.get("client_id")
+
+    events, page, watermark = _read_access_events(
+        client, inputs.get("since"), _int(inputs.get("max_events"), 500)
+    )
+    classified = [_thin_event(e, our_client_id) for e in events]
+
+    counts = {}
+    for entry in classified:
+        counts[entry["verdict"]] = counts.get(entry["verdict"], 0) + 1
+
+    ungoverned = [e for e in classified if e["verdict"] == "ungoverned"]
+
+    warnings = []
+    if ungoverned:
+        warnings.append(
+            str(len(ungoverned))
+            + " access changes have no governed approval behind them."
+        )
+    if not page["complete"]:
+        warnings.append(
+            "The log was not read to completion, so this is a partial view and "
+            "cannot support any claim about what is absent."
+        )
+
+    return _ok(
+        "custody.detect_ungoverned",
+        {
+            "window_since": inputs.get("since"),
+            "log_watermark": watermark,
+            "claim": (
+                "No ungoverned access change was VISIBLE as of "
+                + str(watermark)
+                + ". This is not a claim that none occurred: Okta publishes no "
+                "maximum System Log delivery latency."
+                if not ungoverned
+                else str(len(ungoverned))
+                + " ungoverned access changes were visible as of "
+                + str(watermark)
+            ),
+            "counts": counts,
+            "events_examined": len(classified),
+            "log_read_complete": page["complete"],
+            "ungoverned": ungoverned,
+            "all_events": classified,
+        },
+        warnings or None,
+    )
+
+
+@_guard("custody.report")
+def custody_report(inputs, context):
+    """A custody timeline for one user or group, with a verdict per change."""
+    target_id = inputs.get("target_id")
+    if not target_id:
+        raise AirlockError(
+            "input_missing", "target_id is required: a user id or a group id."
+        )
+
+    creds = _vault_credentials()
+    client = OktaClient(creds)
+    our_client_id = creds.get("client_id")
+
+    events, page, watermark = _read_access_events(
+        client, inputs.get("since"), _int(inputs.get("max_events"), 500)
+    )
+    timeline = []
+    for event in events:
+        thin = _thin_event(event, our_client_id)
+        touches = any(t.get("id") == target_id for t in thin["targets"])
+        if touches or (thin["actor"] or {}).get("id") == target_id:
+            timeline.append(thin)
+
+    verdicts = {e["verdict"] for e in timeline}
+    if not timeline:
+        custody = "unproven"
+        summary = (
+            "No access change touching this target is visible in the window read. "
+            "That is not evidence that none occurred."
+        )
+    elif verdicts == {"governed"}:
+        custody = "governed"
+        summary = "Every visible change to this target was made through this module."
+    elif "ungoverned" in verdicts:
+        custody = "contested"
+        summary = (
+            "At least one visible change to this target was made outside this "
+            "module, so custody cannot be claimed for it."
+        )
+    else:
+        custody = "partial"
+        summary = (
+            "Visible changes are a mix of governed and system originated. No "
+            "ungoverned change was seen in the window read."
+        )
+
+    return _ok(
+        "custody.report",
+        {
+            "target_id": target_id,
+            "custody": custody,
+            "summary": summary,
+            "log_watermark": watermark,
+            "log_read_complete": page["complete"],
+            "changes_visible": len(timeline),
+            "timeline": timeline,
+            "bound": (
+                "Every verdict here is bounded by the log watermark above. Okta "
+                "publishes no maximum delivery latency, so a change made moments "
+                "ago may not yet be visible."
+            ),
+        },
+        None
+        if page["complete"]
+        else ["The log was not read to completion; this timeline may be partial."],
+    )
+
+
 # The marketplace linter resolves a command id to a function by replacing dots and
 # dashes with underscores. An older publisher FAQ documents an _h_ prefix instead.
 # Both names are bound to the same function so neither loader can miss it.
@@ -1756,3 +2023,5 @@ _h_access_explain = access_explain
 _h_radius_user_deactivation = radius_user_deactivation
 _h_plan_group_membership = plan_group_membership
 _h_plan_deactivate_user = plan_deactivate_user
+_h_custody_detect_ungoverned = custody_detect_ungoverned
+_h_custody_report = custody_report

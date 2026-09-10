@@ -226,7 +226,30 @@ linter accepted a manifest without any of them.
 should be re run after a station upgrade, because it is a copy of behaviour read out of
 one version.
 
-## 11. Scope of the claim
+## 11. Okta does not attribute every console change to the person who made it
+
+**verified**
+
+The custody design rests on the System Log naming who made a change. It does, but not
+always usefully.
+
+Assigning an administrator role through the Okta console was recorded as
+`user.account.privilege.grant` with the actor set to **`system@okta.com`**, a
+SystemPrincipal, rather than to the signed in administrator who clicked the button.
+
+So a change a human genuinely made can arrive attributed to Okta itself. This module
+classifies such an event as **system** rather than as ungoverned, which is the honest
+reading of what the log says, and it means **a real ungoverned change can be recorded in
+a way that does not look ungoverned**.
+
+**What this module does.** It reports the actor Okta gave, and never invents one. The
+verdict vocabulary keeps `system` separate from `governed` precisely so that a reader
+can see the difference between "this module did it" and "Okta says it did it". Where a
+change matters, the timeline shows the raw actor so a human can judge it.
+
+This is a real limit on the custody claim and it is stated rather than buried.
+
+## 12. Scope of the claim
 
 This module produces evidence that a human reviews. It is a human in the loop record,
 not a certified compliance product, and it does not by itself satisfy any control in

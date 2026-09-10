@@ -2,7 +2,7 @@
   "id": "sakrit204/okta_access_airlock",
   "name": "Okta Access Airlock",
   "manifest_version": 2,
-  "version": "0.4.0",
+  "version": "0.5.0",
   "provider": "okta",
   "category": "Identity",
   "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",
@@ -410,6 +410,74 @@
           "required": true,
           "label": "User id",
           "help": "The user to plan a deactivation for."
+        }
+      }
+    },
+    {
+      "id": "custody.detect_ungoverned",
+      "title": "Detect ungoverned changes",
+      "provider": "okta",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "Find access changes in the Okta System Log with no governed approval behind them. Reads Okta's own record rather than any record this module keeps. Reports what was visible as of a stated log watermark, and never claims that no ungoverned change occurred.",
+      "side_effects": "none",
+      "input_schema": {
+        "since": {
+          "type": "string",
+          "required": false,
+          "label": "Since",
+          "help": "ISO timestamp. Defaults to whatever the log returns."
+        },
+        "max_events": {
+          "type": "number",
+          "required": false,
+          "default": 500,
+          "help": "Stop after this many log events and report the view as partial."
+        }
+      }
+    },
+    {
+      "id": "custody.report",
+      "title": "Custody report for one target",
+      "provider": "okta",
+      "risk": "medium",
+      "mode": "read",
+      "preview": true,
+      "receipt_required": true,
+      "requires": [
+        "OKTA_ORG_URL",
+        "OKTA_CLIENT_ID",
+        "OKTA_KEY_ID",
+        "OKTA_PRIVATE_KEY"
+      ],
+      "description": "A custody timeline for one user or group with a verdict per change: governed, ungoverned, system originated or unproven. Every verdict is bounded by the log watermark it was computed against.",
+      "side_effects": "none",
+      "input_schema": {
+        "target_id": {
+          "type": "string",
+          "required": true,
+          "label": "Target id",
+          "help": "A user id or a group id."
+        },
+        "since": {
+          "type": "string",
+          "required": false,
+          "label": "Since",
+          "help": "ISO timestamp."
+        },
+        "max_events": {
+          "type": "number",
+          "required": false,
+          "default": 500,
+          "help": "Log events to examine."
         }
       }
     }
