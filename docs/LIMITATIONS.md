@@ -93,7 +93,30 @@ Stating these so nobody assumes coverage that does not exist:
 * **No AI or language model commands.** The purpose of this module is to constrain
   agents. Embedding one would blur that.
 
-## 7. What the development org could not prove
+## 7. Authentication requires DPoP, and that is not optional here
+
+**verified**
+
+Current Okta orgs require RFC 9449 Demonstrating Proof of Possession on the client
+credentials grant. A token request without a DPoP proof is refused with
+`invalid_dpop_proof` before any command runs.
+
+Okta's application settings offer a switch to disable that requirement. **This module
+does not ask you to use it.** DPoP binds the access token to a proof key, so a token
+lifted from a log, a crash dump or a process listing cannot be replayed without the
+private key that minted it. Turning it off to make integration easier would remove a
+boundary for no benefit.
+
+Two consequences worth knowing:
+
+* The proof key is generated per process and never persisted. Restarting the Station
+  mints a new one, which is intended.
+* Okta enforces single use on the client assertion identifier, so every token attempt
+  builds a fresh assertion rather than reusing one across the DPoP nonce handshake.
+  Getting this wrong produces an intermittent authentication failure that only appears
+  when a retry happens, which is why it is called out here.
+
+## 8. What the development org could not prove
 
 **verified**
 
@@ -110,7 +133,7 @@ real pressure.
 Where a claim in this repository depends on scale that was never run, it says so. No
 number in the documentation is an extrapolation presented as a measurement.
 
-## 8. Scope of the claim
+## 9. Scope of the claim
 
 This module produces evidence that a human reviews. It is a human in the loop record,
 not a certified compliance product, and it does not by itself satisfy any control in

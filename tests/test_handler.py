@@ -224,6 +224,105 @@ class AssertionTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "credential_invalid")
 
 
+class DpopTests(unittest.TestCase):
+    """DPoP binds the access token to a key, so a stolen token is unusable.
+
+    Current Okta orgs require it on the token endpoint. Discovered by running
+    against a live org, not from the documentation.
+    """
+
+    @classmethod
+    def setUpClass(cls):
+        try:
+            from cryptography.hazmat.primitives.asymmetric import rsa
+        except ImportError:
+            raise unittest.SkipTest("cryptography is not installed")
+        cls.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+
+    def _parts(self, proof):
+        segments = proof.split(".")
+        self.assertEqual(len(segments), 3)
+        return json.loads(_unb64(segments[0])), json.loads(_unb64(segments[1]))
+
+    def test_proof_header_carries_the_public_key(self):
+        header, _claims = self._parts(
+            handler._dpop_proof(self.key, "POST", "https://a.okta.com/oauth2/v1/token")
+        )
+        self.assertEqual(header["typ"], "dpop+jwt")
+        self.assertEqual(header["alg"], "RS256")
+        self.assertEqual(header["jwk"]["kty"], "RSA")
+        self.assertIn("n", header["jwk"])
+        self.assertIn("e", header["jwk"])
+
+    def test_private_key_never_appears_in_the_embedded_jwk(self):
+        header, _claims = self._parts(
+            handler._dpop_proof(self.key, "GET", "https://a.okta.com/api/v1/users")
+        )
+        for private_field in ("d", "p", "q", "dp", "dq", "qi"):
+            self.assertNotIn(private_field, header["jwk"])
+
+    def test_htu_excludes_query_and_fragment(self):
+        _header, claims = self._parts(
+            handler._dpop_proof(
+                self.key, "GET", "https://a.okta.com/api/v1/users?limit=1#frag"
+            )
+        )
+        self.assertEqual(claims["htu"], "https://a.okta.com/api/v1/users")
+        self.assertEqual(claims["htm"], "GET")
+
+    def test_nonce_is_included_only_when_supplied(self):
+        _h, without = self._parts(
+            handler._dpop_proof(self.key, "POST", "https://a.okta.com/x")
+        )
+        self.assertNotIn("nonce", without)
+        _h, with_nonce = self._parts(
+            handler._dpop_proof(self.key, "POST", "https://a.okta.com/x", nonce="abc")
+        )
+        self.assertEqual(with_nonce["nonce"], "abc")
+
+    def test_ath_is_the_base64url_sha256_of_the_access_token(self):
+        import base64
+        import hashlib
+
+        token = "an.access.token"
+        _h, claims = self._parts(
+            handler._dpop_proof(
+                self.key, "GET", "https://a.okta.com/x", access_token=token
+            )
+        )
+        expected = (
+            base64.urlsafe_b64encode(hashlib.sha256(token.encode()).digest())
+            .rstrip(b"=")
+            .decode()
+        )
+        self.assertEqual(claims["ath"], expected)
+
+    def test_each_proof_carries_a_fresh_identifier(self):
+        _h, first = self._parts(
+            handler._dpop_proof(self.key, "GET", "https://a.okta.com/x")
+        )
+        _h, second = self._parts(
+            handler._dpop_proof(self.key, "GET", "https://a.okta.com/x")
+        )
+        self.assertNotEqual(first["jti"], second["jti"])
+
+    def test_nonce_challenge_is_recognised_from_either_status(self):
+        self.assertTrue(handler._wants_new_nonce(400, {"error": "use_dpop_nonce"}))
+        self.assertTrue(handler._wants_new_nonce(401, {"error": "use_dpop_nonce"}))
+        self.assertTrue(handler._wants_new_nonce(400, {"error": "invalid_dpop_proof"}))
+
+    def test_other_failures_are_not_mistaken_for_a_nonce_challenge(self):
+        self.assertFalse(handler._wants_new_nonce(400, {"error": "consent_required"}))
+        self.assertFalse(handler._wants_new_nonce(403, {"error": "use_dpop_nonce"}))
+        self.assertFalse(handler._wants_new_nonce(200, {"ok": True}))
+        self.assertFalse(handler._wants_new_nonce(400, None))
+
+    def test_nonce_header_is_found_whatever_the_casing(self):
+        for name in ("DPoP-Nonce", "dpop-nonce", "Dpop-Nonce"):
+            self.assertEqual(handler._dpop_nonce_from({name: "n1"}), "n1")
+        self.assertIsNone(handler._dpop_nonce_from({"Other": "x"}))
+
+
 class ManifestTests(unittest.TestCase):
     """The manifest and the handler must not drift apart."""
 

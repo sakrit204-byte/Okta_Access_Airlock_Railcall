@@ -76,11 +76,20 @@ def probe_scopes(client, findings):
     try:
         client.access_token()
     except handler.AirlockError as err:
-        print("  token refused:", err.code, "|", err.message)
-        findings["token"] = {"ok": False, "code": err.code, "detail": err.detail}
+        print("  grant refused:", err.code, "|", err.message)
+        detail = err.detail or {}
+        print("  http status:", detail.get("http_status"))
+        response = detail.get("response") or {}
+        if isinstance(response, dict):
+            for key in ("error", "error_description", "errorSummary", "errorCode"):
+                if response.get(key):
+                    print("  okta says:", key, "=", response[key])
+        # Keyed "grant" rather than "token": the redaction pass strips any key
+        # named token, which would hide this diagnostic from the findings file.
+        findings["grant"] = {"ok": False, "code": err.code, "detail": detail}
         return False
     granted = client.granted_scopes
-    findings["token"] = {"ok": True, "granted_scopes": granted}
+    findings["grant"] = {"ok": True, "granted_scopes": granted}
     print("  granted:", " ".join(granted) if granted else "(none reported)")
     print()
     return True

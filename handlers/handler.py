@@ -6,6 +6,7 @@ from everything it returns, and fails closed when an outcome cannot be determine
 """
 
 import base64
+import hashlib
 import json
 import time
 import urllib.error
@@ -291,8 +292,27 @@ class OktaClient:
         self.base = "https://" + self.host
         self.budget = budget or RateBudget()
         self._token = None
+        self._token_type = "Bearer"
         self._token_expires_at = 0.0
         self._granted_scopes = []
+        self._dpop_key = None
+        self._token_nonce = None
+        self._resource_nonce = None
+
+    @property
+    def dpop_key(self):
+        """An ephemeral proof key, generated once per client and never persisted.
+
+        Deliberately not the client assertion key. That one is registered with Okta
+        as the application's identity; this one only proves possession for the life
+        of this process.
+        """
+        if self._dpop_key is None:
+            _hashes, _serialization, _padding, rsa = _load_crypto()
+            self._dpop_key = rsa.generate_private_key(
+                public_exponent=65537, key_size=2048
+            )
+        return self._dpop_key
 
     def request(self, method, path, query=None, body=None, scopes=None):
         url = self.base + API_PREFIX + path
@@ -300,17 +320,46 @@ class OktaClient:
             url = url + "?" + urllib.parse.urlencode(query)
         _assert_allowed(url, self.host)
         token = self.access_token(scopes)
-        headers = {
-            "Authorization": "Bearer " + token,
-            "Accept": "application/json",
-        }
+
         payload = None
+        extra = {}
         if body is not None:
             payload = json.dumps(body).encode("utf8")
-            headers["Content-Type"] = "application/json"
-        status, response_headers, parsed = self._send(method, url, headers, payload)
+            extra["Content-Type"] = "application/json"
+
+        status, response_headers, parsed = self._send_authorized(
+            method, url, token, payload, extra
+        )
+
+        # Okta can demand a fresh resource nonce at any point, not only on the first
+        # call. Retrying once with the nonce it just handed us is part of the
+        # protocol rather than an error path.
+        if _wants_new_nonce(status, parsed):
+            nonce = _dpop_nonce_from(response_headers)
+            if nonce and nonce != self._resource_nonce:
+                self._resource_nonce = nonce
+                status, response_headers, parsed = self._send_authorized(
+                    method, url, token, payload, extra
+                )
+
         self.budget.record(_bucket_for(path), response_headers)
         return status, response_headers, parsed
+
+    def _send_authorized(self, method, url, token, payload, extra):
+        headers = {"Accept": "application/json"}
+        headers.update(extra)
+        if self._token_type.lower() == "dpop":
+            headers["Authorization"] = "DPoP " + token
+            headers["DPoP"] = _dpop_proof(
+                self.dpop_key,
+                method,
+                url,
+                nonce=self._resource_nonce,
+                access_token=token,
+            )
+        else:
+            headers["Authorization"] = "Bearer " + token
+        return self._send(method, url, headers, payload)
 
     def access_token(self, scopes=None):
         wanted = sorted(set(scopes or self.default_scopes()))
@@ -329,39 +378,56 @@ class OktaClient:
 
     def _mint(self, scopes):
         client_id = _require(self.creds, "client_id")
-        assertion = _client_assertion(
-            client_id=client_id,
-            audience=self.base + TOKEN_PATH,
-            private_key_pem=_require(self.creds, "private_key"),
-            key_id=self.creds.get("key_id"),
-        )
+        private_key_pem = _require(self.creds, "private_key")
         url = self.base + TOKEN_PATH
         _assert_allowed(url, self.host)
-        form = urllib.parse.urlencode(
-            {
-                "grant_type": "client_credentials",
-                "scope": " ".join(scopes),
-                "client_assertion_type": (
-                    "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
-                ),
-                "client_assertion": assertion,
-            }
-        ).encode("utf8")
-        status, _headers, parsed = self._send(
-            "POST",
-            url,
-            {
+
+        def attempt():
+            # A fresh assertion every attempt. Okta enforces one time use on the
+            # client_assertion jti, so reusing one across the DPoP nonce retry is
+            # rejected as invalid_client rather than as a replay.
+            form = urllib.parse.urlencode(
+                {
+                    "grant_type": "client_credentials",
+                    "scope": " ".join(scopes),
+                    "client_assertion_type": (
+                        "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
+                    ),
+                    "client_assertion": _client_assertion(
+                        client_id=client_id,
+                        audience=url,
+                        private_key_pem=private_key_pem,
+                        key_id=self.creds.get("key_id"),
+                    ),
+                }
+            ).encode("utf8")
+            headers = {
                 "Content-Type": "application/x-www-form-urlencoded",
                 "Accept": "application/json",
-            },
-            form,
-        )
+                "DPoP": _dpop_proof(
+                    self.dpop_key, "POST", url, nonce=self._token_nonce
+                ),
+            }
+            return self._send("POST", url, headers, form)
+
+        status, headers, parsed = attempt()
+
+        # Okta answers the first proof with a nonce it wants echoed back. This is
+        # the documented handshake, not a failure, so it is retried once here rather
+        # than surfaced to the caller.
+        if _wants_new_nonce(status, parsed):
+            nonce = _dpop_nonce_from(headers)
+            if nonce and nonce != self._token_nonce:
+                self._token_nonce = nonce
+                status, headers, parsed = attempt()
+
         if status != 200 or not isinstance(parsed, dict) or "access_token" not in parsed:
             raise AirlockError(
                 "token_denied",
                 "Okta refused the client credentials grant.",
                 {"http_status": status, "response": _redact(parsed)},
             )
+        self._token_type = parsed.get("token_type") or "Bearer"
         self._token = parsed["access_token"]
         granted = parsed.get("scope", "")
         self._granted_scopes = granted.split() if isinstance(granted, str) else []
@@ -461,6 +527,84 @@ def _client_assertion(client_id, audience, private_key_pem, key_id=None):
         signing_input.encode("ascii"), padding.PKCS1v15(), hashes.SHA256()
     )
     return signing_input + "." + _b64url(signature)
+
+
+def _load_crypto():
+    try:
+        from cryptography.hazmat.primitives import hashes, serialization
+        from cryptography.hazmat.primitives.asymmetric import padding, rsa
+    except ImportError:
+        raise AirlockError(
+            "crypto_unavailable",
+            "The cryptography package is required to sign proofs and assertions.",
+        )
+    return hashes, serialization, padding, rsa
+
+
+def _sign_jwt(key, header, claims):
+    hashes, _serialization, padding, _rsa = _load_crypto()
+    signing_input = (
+        _b64url(json.dumps(header, separators=(",", ":")).encode("utf8"))
+        + "."
+        + _b64url(json.dumps(claims, separators=(",", ":")).encode("utf8"))
+    )
+    signature = key.sign(
+        signing_input.encode("ascii"), padding.PKCS1v15(), hashes.SHA256()
+    )
+    return signing_input + "." + _b64url(signature)
+
+
+def _public_jwk(key):
+    numbers = key.public_key().public_numbers()
+    return {
+        "kty": "RSA",
+        "n": _b64url(numbers.n.to_bytes((numbers.n.bit_length() + 7) // 8, "big")),
+        "e": _b64url(numbers.e.to_bytes((numbers.e.bit_length() + 7) // 8, "big")),
+    }
+
+
+def _htu(url):
+    """The DPoP htu claim is the request URI without query or fragment."""
+    parts = urllib.parse.urlsplit(url)
+    return urllib.parse.urlunsplit((parts.scheme, parts.netloc, parts.path, "", ""))
+
+
+def _dpop_proof(key, method, url, nonce=None, access_token=None):
+    """Build an RFC 9449 DPoP proof.
+
+    Current Okta orgs require this on the token endpoint, and the resulting access
+    token is bound to the proof key. A token lifted from a log or a process dump is
+    unusable without the private key that minted it, which is a boundary a bearer
+    token cannot express.
+    """
+    header = {"typ": "dpop+jwt", "alg": "RS256", "jwk": _public_jwk(key)}
+    claims = {
+        "htm": method,
+        "htu": _htu(url),
+        "iat": int(time.time()),
+        "jti": str(uuid.uuid4()),
+    }
+    if nonce:
+        claims["nonce"] = nonce
+    if access_token:
+        digest = hashlib.sha256(access_token.encode("ascii")).digest()
+        claims["ath"] = _b64url(digest)
+    return _sign_jwt(key, header, claims)
+
+
+def _dpop_nonce_from(headers):
+    for name in ("DPoP-Nonce", "dpop-nonce", "Dpop-Nonce"):
+        if headers.get(name):
+            return headers[name]
+    return None
+
+
+def _wants_new_nonce(status, parsed):
+    if status not in (400, 401):
+        return False
+    if not isinstance(parsed, dict):
+        return False
+    return parsed.get("error") in ("use_dpop_nonce", "invalid_dpop_proof")
 
 
 def _guard(command):
