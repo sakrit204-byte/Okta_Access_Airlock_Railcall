@@ -42,6 +42,35 @@ def main():
         if missing:
             problems.append(command["id"] + " requires undeclared credentials: " + ", ".join(missing))
 
+    # verify_connection is the first run experience. If it names a command that
+    # does not exist, or omits one it really does block, it is lying at exactly
+    # the moment a buyer is deciding whether to trust the module.
+    import importlib.util
+    spec = importlib.util.spec_from_file_location(
+        "h", ROOT / "handlers" / "handler.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    real = {c["id"] for c in commands}
+    named = set()
+    for probe in module.SCOPE_PROBES.values():
+        named.update(probe["blocks"])
+    for cmds in module.WRITE_SCOPES.values():
+        named.update(cmds)
+    ghosts = sorted(named - real)
+    if ghosts:
+        problems.append(
+            "the scope tables name commands that do not exist: " + ", ".join(ghosts)
+        )
+    writes_named = set()
+    for cmds in module.WRITE_SCOPES.values():
+        writes_named.update(cmds)
+    real_writes = {c["id"] for c in commands if c.get("mode") != "read"}
+    unlisted = sorted(real_writes - writes_named)
+    if unlisted:
+        problems.append(
+            "these writes are in no write scope table: " + ", ".join(unlisted)
+        )
+
     if manifest.get("irreversible_effects") is None:
         problems.append("irreversible_effects is not declared")
 

@@ -304,7 +304,51 @@ prefix, giving twenty seven distinct action ids. The module still declares
 `tools/station_check.py` now computes every action id and fails on any collision, so this
 cannot come back.
 
-## 14. Scope of the claim
+## 14. Okta membership reads lag Okta membership writes
+
+**verified**
+
+A group membership write returns 204 and a read issued immediately afterwards still
+reports the old set. Measured on a live org:
+
+```
+PUT  /groups/{g}/users/{u}   -> 204
+GET  /groups/{g}/users       -> 0 members     immediately
+GET  /groups/{g}/users       -> 1 member      one second later
+```
+
+This is not a curiosity. The apply path re reads the membership and compares it against
+the approved fingerprint, so a change made moments before the apply is **invisible to
+that re read**. The comparison matches, the write proceeds, and the approval appears to
+have held while the thing it was pinned to had already moved.
+
+The guarantee would have held everywhere except the case it exists for.
+
+**What this module does.** Every apply that pins to a membership reads it **twice**, with
+a pause, and proceeds only if both reads agree. A set caught mid change is refused as
+`membership_unsettled` rather than trusted.
+
+**This narrows the window. It does not close it.** Okta publishes no convergence bound,
+so a change landing inside the gap between the two reads is still invisible. The honest
+claim is that the fingerprint catches drift that has settled, not drift made in the last
+instant, and no wording in this module claims otherwise.
+
+Verified after the fix: a plan approved over one member, an intruder added, and the apply
+refuses with `plan_drifted` naming both fingerprints.
+
+## 15. A refusal that arrived looking like a crash
+
+**verified, and it was our bug**
+
+The guard wrapping every command turned any exception into `unexpected_error`. Deliberate
+refusals raise, so a drift refusal reached the caller carrying the wrong code and none of
+its detail: the one message a reader most needs to trust arrived indistinguishable from a
+bug.
+
+Found by running a live drift test and reading the output rather than the exit status.
+The guard now re raises refusals unchanged and wraps only genuine crashes.
+
+## 16. Scope of the claim
 
 This module produces evidence that a human reviews. It is a human in the loop record,
 not a certified compliance product, and it does not by itself satisfy any control in

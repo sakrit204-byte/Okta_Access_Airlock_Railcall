@@ -55,13 +55,10 @@ SCOPE_PROBES = {
         "path": "/users",
         "query": {"limit": "1"},
         "blocks": [
-            "users.find",
-            "users.get",
-            "users.list_access",
-            "users.list_live_credentials",
-            "radius.user_deactivation",
-            "access.explain",
-            "access.review_pack",
+            "org.describe", "users.find", "users.get", "users.list_access",
+            "users.list_live_credentials", "users.list_factors",
+            "access.explain", "access.review_pack", "radius.user_deactivation",
+            "plan.deactivate_user", "plan.offboard_user", "plan.reset_factors",
         ],
     },
     "okta.groups.read": {
@@ -69,10 +66,9 @@ SCOPE_PROBES = {
         "path": "/groups",
         "query": {"limit": "1"},
         "blocks": [
-            "groups.find",
-            "groups.get_members",
-            "radius.group_deletion",
-            "access.rule_entanglement",
+            "groups.find", "groups.get_members", "groups.list_rules",
+            "access.rule_entanglement", "radius.group_deletion",
+            "plan.group_membership", "plan.group_sync",
         ],
     },
     "okta.logs.read": {
@@ -80,17 +76,12 @@ SCOPE_PROBES = {
         "path": "/logs",
         "query": {"limit": "1"},
         "blocks": [
-            "custody.report",
-            "custody.detect_ungoverned",
+            "custody.detect_ungoverned", "custody.report", "custody.audit_pack",
             "custody.reconcile_unresolved",
-            "custody.audit_pack",
+            # These two read the log rather than the roles API, because the roles
+            # API answers 403 for a read only administrator. See LIMITATIONS 8.
+            "org.list_admins", "access.dormant_admins",
         ],
-    },
-    "okta.roles.read": {
-        "method": "GET",
-        "path": "/iam/roles",
-        "query": {"limit": "1"},
-        "blocks": ["org.list_admins", "plan.role_change"],
     },
     "okta.apps.read": {
         "method": "GET",
@@ -98,20 +89,27 @@ SCOPE_PROBES = {
         "query": {"limit": "1"},
         "blocks": ["access.explain", "radius.group_deletion"],
     },
+    # okta.roles.read is requested but blocks nothing, because the roles API
+    # refuses a read only administrator regardless. Commands that would have used
+    # it degrade and say so rather than failing, so listing them here would
+    # overstate the damage of not granting it.
+    "okta.roles.read": {
+        "method": "GET",
+        "path": "/users",
+        "query": {"limit": "1"},
+        "blocks": [],
+    },
 }
 
 WRITE_SCOPES = {
     "okta.users.manage": [
-        "apply.suspend_user",
-        "apply.unsuspend_user",
-        "apply.unlock_user",
-        "apply.deactivate_user",
-        "apply.offboard_user",
-        "apply.reset_factors",
+        "apply.suspend_user", "apply.unsuspend_user", "apply.unlock_user",
+        "apply.deactivate_user", "apply.offboard_user", "apply.reset_factors",
         "apply.revoke_live_credentials",
     ],
-    "okta.groups.manage": ["apply.group_membership", "apply.group_sync"],
-    "okta.roles.manage": ["apply.role_change"],
+    "okta.groups.manage": [
+        "apply.group_membership", "apply.group_sync", "apply.offboard_user",
+    ],
 }
 
 
@@ -669,6 +667,12 @@ def _guard(command):
                 return fn(inputs or {}, context or {})
             except AirlockError as err:
                 raise _as_runtime(_fail(command, err.code, err.message, err.detail))
+            except RuntimeError:
+                # A refusal this module raised deliberately, carrying its own
+                # code and detail. Re wrapping it as unexpected_error would
+                # destroy exactly the information the reader needs: a drift
+                # refusal would arrive indistinguishable from a crash.
+                raise
             except Exception as err:  # noqa: BLE001
                 raise _as_runtime(
                     _fail(
@@ -728,13 +732,40 @@ def org_verify_connection(inputs, context):
             blocked_commands.update(probe["blocks"])
         probes.append(entry)
 
+    # An OAuth scope is only half the permission. The admin role assigned to the
+    # application is the other half, and a read only role refuses every write
+    # while the scope still reports as granted. Reporting "granted" alone would
+    # tell a buyer their writes work right up until the first one 403s.
+    #
+    # Probed by sending a deliberately invalid write and reading the status:
+    # 403 means the role refuses writes outright, 400 means the role permits the
+    # write and only the body was rejected. Nothing is created either way.
+    role_permits_writes = None
+    role_probe_status = None
+    if any(scope in granted for scope in WRITE_SCOPES):
+        status, _headers, _body = client.request(
+            "POST", "/groups", body={"profile": {}}
+        )
+        role_probe_status = status
+        if status == 403:
+            role_permits_writes = False
+        elif status in (400, 422):
+            role_permits_writes = True
+
     write_status = []
     for scope, commands in WRITE_SCOPES.items():
         held = scope in granted
+        usable = held and role_permits_writes is not False
         write_status.append(
-            {"scope": scope, "granted": held, "enables_commands": commands}
+            {
+                "scope": scope,
+                "granted": held,
+                "role_permits_writes": role_permits_writes,
+                "usable": usable,
+                "enables_commands": commands,
+            }
         )
-        if not held:
+        if not usable:
             blocked_commands.update(commands)
 
     data = {
@@ -745,16 +776,26 @@ def org_verify_connection(inputs, context):
         "read_scope_probes": probes,
         "write_scopes": write_status,
         "blocked_commands": sorted(blocked_commands),
+        "admin_role_permits_writes": role_permits_writes,
+        "admin_role_probe_status": role_probe_status,
         "rate_budget": client.budget.snapshot(),
         "checked_at": _now_iso(),
     }
     if token_error:
         data["token_error"] = token_error
     warnings = []
+    if role_permits_writes is False:
+        warnings.append(
+            "Write scopes are granted but the admin role assigned to this "
+            "application refuses every write. An OAuth scope and an admin role "
+            "are two independent permissions and both are required. Assign a "
+            "role with write permission, or leave it as it is and run this "
+            "module read only, which is a supported way to use it."
+        )
     if blocked_commands:
         warnings.append(
             str(len(blocked_commands))
-            + " commands are unavailable with the scopes currently granted."
+            + " commands are unavailable with the current scopes and admin role."
         )
     return _ok("org.verify_connection", data, warnings or None)
 
@@ -889,6 +930,37 @@ def _paged(client, path, query=None, cap=1000):
         "complete": not truncated,
         "cap": cap,
     }
+
+
+MEMBERSHIP_SETTLE_SECONDS = 1.5
+
+
+def _settled_members(client, group_path, cap=1000):
+    """Read a membership twice and only accept it if it has stopped moving.
+
+    Measured on a live org: a PUT membership returns 204, and a GET issued
+    immediately afterwards still reports the old set. One second later it reports
+    the new one.
+
+    That defeats a single re read. An approval pinned to a fingerprint would
+    compare against a stale set, match, and let the write through as though
+    nothing had changed. The guarantee this module sells would hold everywhere
+    except the case it exists for, a change made moments before the apply.
+
+    Reading twice with a gap does not close the window, since Okta publishes no
+    convergence bound. It narrows it, and a set caught mid change is reported as
+    unstable rather than trusted.
+    """
+    first = _paged(client, group_path, {"limit": "200"}, cap)
+    if not first["complete"]:
+        return first, False
+    time.sleep(MEMBERSHIP_SETTLE_SECONDS)
+    second = _paged(client, group_path, {"limit": "200"}, cap)
+    if not second["complete"]:
+        return second, False
+    ids_first = sorted(u.get("id") for u in first["items"] if u.get("id"))
+    ids_second = sorted(u.get("id") for u in second["items"] if u.get("id"))
+    return second, ids_first == ids_second
 
 
 def _paged_optional(client, path, query=None, cap=1000):
@@ -2726,12 +2798,19 @@ def apply_group_membership(inputs, context):
 
     client = _client()
     encoded = urllib.parse.quote(str(group_id))
-    members = _paged(client, "/groups/" + encoded + "/users", {"limit": "200"})
+    members, settled = _settled_members(client, "/groups/" + encoded + "/users")
     if not members["complete"]:
         raise AirlockError(
             "set_incomplete",
             "The group membership could not be read to completion, so the "
             "approved fingerprint cannot be checked against it.",
+        )
+    if not settled:
+        raise AirlockError(
+            "membership_unsettled",
+            "This group's membership changed between two reads taken moments "
+            "apart, so it is being modified right now. Refusing rather than "
+            "pinning an approval to a set that is still moving.",
         )
 
     member_ids = sorted(u.get("id") for u in members["items"] if u.get("id"))
@@ -3013,12 +3092,18 @@ def apply_group_sync(inputs, stamp):
 
     client = _client()
     encoded = urllib.parse.quote(str(group_id))
-    members = _paged(client, "/groups/" + encoded + "/users", {"limit": "200"})
+    members, settled = _settled_members(client, "/groups/" + encoded + "/users")
     if not members["complete"]:
         raise AirlockError(
             "set_incomplete",
             "The membership could not be read to completion, so the approved "
             "fingerprint cannot be checked against it.",
+        )
+    if not settled:
+        raise AirlockError(
+            "membership_unsettled",
+            "This group's membership changed between two reads taken moments "
+            "apart. Refusing rather than syncing against a set that is moving.",
         )
 
     current = sorted(u.get("id") for u in members["items"] if u.get("id"))

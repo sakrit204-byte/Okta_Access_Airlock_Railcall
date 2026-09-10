@@ -682,6 +682,59 @@ class LogCursorTests(unittest.TestCase):
         self.assertEqual(client.calls[1][2].get("after"), "e1")
 
 
+class RefusalIdentityTests(unittest.TestCase):
+    """A deliberate refusal must not arrive looking like a crash.
+
+    The guard wrapped every exception as unexpected_error, so a drift refusal
+    reached the caller indistinguishable from a bug. Found by watching a live
+    drift test report the wrong thing.
+    """
+
+    def test_a_deliberate_refusal_keeps_its_code(self):
+        @handler._guard("apply.thing")
+        def refuse(inputs, stamp):
+            raise handler._as_runtime(
+                handler._fail("apply.thing", "plan_drifted", "it moved", {"a": 1})
+            )
+
+        with self.assertRaises(RuntimeError) as caught:
+            refuse({}, {})
+        self.assertIn("plan_drifted", str(caught.exception))
+        self.assertNotIn("unexpected_error", str(caught.exception))
+
+    def test_a_genuine_crash_is_still_reported_as_unexpected(self):
+        @handler._guard("apply.thing")
+        def explode(inputs, stamp):
+            return 1 / 0
+
+        with self.assertRaises(RuntimeError) as caught:
+            explode({}, {})
+        self.assertIn("unexpected_error", str(caught.exception))
+
+
+class SettledReadTests(unittest.TestCase):
+    """Okta membership reads lag their own writes, which defeats a single re read."""
+
+    def test_a_membership_still_moving_is_reported_unsettled(self):
+        client = FakeClient([
+            _page([{"id": "u1"}]),
+            _page([{"id": "u1"}, {"id": "u2"}]),
+        ])
+        handler.MEMBERSHIP_SETTLE_SECONDS = 0
+        page, settled = handler._settled_members(client, "/groups/g/users")
+        self.assertFalse(settled)
+
+    def test_a_stable_membership_is_accepted(self):
+        client = FakeClient([
+            _page([{"id": "u1"}, {"id": "u2"}]),
+            _page([{"id": "u2"}, {"id": "u1"}]),
+        ])
+        handler.MEMBERSHIP_SETTLE_SECONDS = 0
+        page, settled = handler._settled_members(client, "/groups/g/users")
+        self.assertTrue(settled)
+        self.assertEqual(page["count"], 2)
+
+
 class ManifestTests(unittest.TestCase):
     """The manifest and the handler must not drift apart."""
 
