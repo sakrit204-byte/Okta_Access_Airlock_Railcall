@@ -31,6 +31,7 @@
       "provider": "okta",
       "hosts": [
         "*.okta.com",
+        "*.okta-emea.com",
         "*.oktapreview.com"
       ]
     }
@@ -38,6 +39,7 @@
   "requires": {
     "network": [
       "*.okta.com",
+      "*.okta-emea.com",
       "*.oktapreview.com"
     ],
     "subprocess": false,

@@ -8,6 +8,7 @@ from everything it returns, and fails closed when an outcome cannot be determine
 import base64
 import hashlib
 import json
+import re
 import time
 import urllib.error
 import urllib.parse
@@ -127,7 +128,7 @@ def _redact(value):
         return out
     if isinstance(value, list):
         return [_redact(item) for item in value]
-    if isinstance(value, str) and value.startswith("Bearer "):
+    if isinstance(value, str) and value.startswith(("Bearer ", "DPoP ")):
         return REDACTED
     return value
 
@@ -152,7 +153,8 @@ INJECTION_PATTERNS = (
         "new instructions", "updated instructions",
     )),
     ("privilege_request", (
-        "grant admin", "make me admin", "super administrator", "elevate",
+        "grant admin", "make me admin", "super administrator",
+        "elevate me", "elevate my", "elevate access", "elevate privilege",
         "add me to", "approve this", "auto approve", "skip approval",
         "no approval needed",
     )),
@@ -163,18 +165,32 @@ CONTROL_CHARACTERS = tuple(chr(n) for n in list(range(0, 9)) + [11, 12] + list(r
 UNTRUSTED_LENGTH_LIMIT = 120
 
 
-def _scan_untrusted(value):
+def _needle_matches(needle, lowered):
+    """Match as whole words, so "act as" cannot fire inside "contact assistant".
+
+    A needle that begins or ends in punctuation, such as "system:" or "http://",
+    cannot sit inside an ordinary word and is matched as a plain substring.
+    """
+    if not needle[0].isalnum() or not needle[-1].isalnum():
+        return needle in lowered
+    pattern = r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])"
+    return re.search(pattern, lowered) is not None
+
+
+def _scan_untrusted(value, field_name=None):
     """Return the reasons one provider controlled string looks adversarial."""
     if not isinstance(value, str) or not value.strip():
         return []
     lowered = value.lower()
     reasons = []
     for label, needles in INJECTION_PATTERNS:
-        if any(needle in lowered for needle in needles):
+        if any(_needle_matches(needle, lowered) for needle in needles):
             reasons.append(label)
     if any(ch in value for ch in CONTROL_CHARACTERS):
         reasons.append("control_characters")
-    if len(value) > UNTRUSTED_LENGTH_LIMIT:
+    # A description is long by nature. Flagging every one of them for length
+    # would teach a reader to ignore the flag, which is worse than not having it.
+    if len(value) > UNTRUSTED_LENGTH_LIMIT and field_name != "description":
         reasons.append("unusually_long")
     if "\n" in value or "\r" in value:
         reasons.append("embedded_newline")
@@ -216,7 +232,7 @@ def _flag_untrusted(payload):
             for index, item in enumerate(node):
                 walk(item, path + [str(index)])
         elif isinstance(node, str):
-            reasons = _scan_untrusted(node)
+            reasons = _scan_untrusted(node, path[-1] if path else None)
             if reasons:
                 findings.append({
                     "field": ".".join(path),
@@ -360,6 +376,11 @@ def _require(creds, field):
     return value
 
 
+# The three domains Okta serves customer orgs from. okta-emea.com is the one
+# people forget, and forgetting it refuses an entire region.
+OKTA_HOST_SUFFIXES = (".okta.com", ".okta-emea.com", ".oktapreview.com")
+
+
 def _org_host(creds):
     """Return the single host this module is permitted to reach."""
     raw = _require(creds, "org_url").strip()
@@ -369,10 +390,11 @@ def _org_host(creds):
             "org_url must be an https URL, for example https://example.okta.com",
         )
     host = urllib.parse.urlsplit(raw).netloc
-    if not host or not host.endswith((".okta.com", ".oktapreview.com")):
+    if not host or not host.endswith(OKTA_HOST_SUFFIXES):
         raise AirlockError(
             "credential_invalid",
-            "org_url must point at an okta.com or oktapreview.com host.",
+            "org_url must point at an okta.com, okta-emea.com or oktapreview.com "
+            "host.",
         )
     return host
 
@@ -1315,14 +1337,13 @@ def users_list_live_credentials(inputs, context):
 
     grants = _paged(client, "/users/" + encoded + "/grants")
 
-    clients = []
-    try:
-        clients = _paged(client, "/users/" + encoded + "/clients")["items"]
-    except AirlockError:
-        clients = []
+    # Each of these is a separate permission on the admin role. A refusal is
+    # reported as a refusal, never rendered as an empty list, for the same reason
+    # admin roles are: "none" and "not permitted to see" are different answers.
+    clients = _paged_optional(client, "/users/" + encoded + "/clients")
 
     tokens = []
-    for entry in clients:
+    for entry in clients["items"]:
         client_id = entry.get("client_id") or entry.get("id")
         if not client_id:
             continue
@@ -1344,16 +1365,22 @@ def users_list_live_credentials(inputs, context):
                 }
             )
 
-    devices = []
-    try:
-        devices = _paged(client, "/users/" + encoded + "/devices")["items"]
-    except AirlockError:
-        devices = []
+    devices = _paged_optional(client, "/users/" + encoded + "/devices")
+
+    unavailable = [
+        name for name, page in (("clients", clients), ("devices", devices))
+        if not page["available"]
+    ]
 
     return _ok(
         "users.list_live_credentials",
         {
             "user_id": user_id,
+            "available": {
+                "oauth_grants": True,
+                "refresh_tokens": clients["available"],
+                "devices": devices["available"],
+            },
             "oauth_grants": [
                 {
                     "id": g.get("id"),
@@ -1365,12 +1392,13 @@ def users_list_live_credentials(inputs, context):
             ],
             "refresh_tokens": tokens,
             "devices": [
-                {"id": d.get("id"), "status": d.get("status")} for d in devices
+                {"id": d.get("id"), "status": d.get("status")}
+                for d in devices["items"]
             ],
             "counts": {
                 "oauth_grants": grants["count"],
-                "refresh_tokens": len(tokens),
-                "devices": len(devices),
+                "refresh_tokens": len(tokens) if clients["available"] else None,
+                "devices": len(devices["items"]) if devices["available"] else None,
             },
             "sessions": {
                 "enumerable": False,
@@ -1381,6 +1409,11 @@ def users_list_live_credentials(inputs, context):
                 ),
             },
         },
+        [
+            "Could not read " + " or ".join(unavailable) + " for this user. The "
+            "admin role assigned to this application is not permitted to. Their "
+            "counts are null, not zero."
+        ] if unavailable else None,
     )
 
 
@@ -1649,10 +1682,13 @@ def radius_user_deactivation(inputs, context):
     live = users_list_live_credentials({"user_id": user_id}, context)
     live_data = live.get("data", {}) if live.get("status") == "ok" else {}
 
+    live_counts = live_data.get("counts") or {}
     survives = {
         "group_memberships": groups["count"],
-        "oauth_grants": (live_data.get("counts") or {}).get("oauth_grants", 0),
-        "refresh_tokens": (live_data.get("counts") or {}).get("refresh_tokens", 0),
+        "oauth_grants": live_counts.get("oauth_grants"),
+        # None here means the admin role could not read them, and it is kept as
+        # None rather than 0 so a refused read never looks like a clean bill.
+        "refresh_tokens": live_counts.get("refresh_tokens"),
         "sessions": "not enumerable",
     }
 
@@ -1666,6 +1702,12 @@ def radius_user_deactivation(inputs, context):
             str(survives["refresh_tokens"])
             + " refresh tokens exist and are revoked separately."
         )
+    elif survives["refresh_tokens"] is None:
+        warnings.append(
+            "Refresh tokens could not be read for this user, so their count is "
+            "unknown rather than zero."
+        )
+    warnings.extend(live.get("warnings") or [])
     if owned_at_risk:
         warnings.append(
             str(len(owned_at_risk)) + " groups would be left with no owner."
@@ -1706,20 +1748,32 @@ def _canonical(value):
     return json.dumps(value, sort_keys=True, separators=(",", ":"), default=str)
 
 
-def _fingerprint(snapshot):
-    return hashlib.sha256(_canonical(snapshot).encode("utf8")).hexdigest()
+def _fingerprint(snapshot, intent=None):
+    """Hash the state a change depends on together with the change itself.
+
+    Both halves matter. Hashing the state alone would let an apply carry the
+    approved fingerprint alongside a different intent, and pass, because the
+    group had not moved. The human approved a removal of one person; the apply
+    would remove three. Binding the intent closes that: any edit to what will be
+    done changes the fingerprint exactly as any edit to the state does.
+    """
+    return hashlib.sha256(
+        _canonical({"snapshot": snapshot, "intent": intent or {}}).encode("utf8")
+    ).hexdigest()
 
 
 def _plan_envelope(command, apply_with, intent, snapshot, preview, warnings=None):
     """The whole of the plan and apply contract, and it needs no storage.
 
     The fingerprint travels out with the plan, a human approves that payload, and
-    the matching apply receives it back and re hashes freshly read state. Nothing
-    is written to disk, so the manifest can honestly keep filesystem_writes empty.
+    the matching apply receives it back and re hashes freshly read state against
+    the intent it was handed. Nothing is written to disk, so the manifest can keep
+    filesystem_writes empty and mean it.
 
-    An approval therefore binds to the state the human reviewed, not to the record
-    ids they were pointed at. Approve a change across forty users, let nine of them
-    move while it sits in a queue, and a naive system writes over state nobody saw.
+    An approval therefore binds to the state the human reviewed and to the change
+    they reviewed, not to the record ids they were pointed at. Approve a change
+    across forty users, let nine of them move while it sits in a queue, and a
+    naive system writes over state nobody saw.
     """
     return {
         "plan_id": str(uuid.uuid4()),
@@ -1727,7 +1781,7 @@ def _plan_envelope(command, apply_with, intent, snapshot, preview, warnings=None
         "apply_with": apply_with,
         "intent": intent,
         "snapshot": snapshot,
-        "fingerprint": _fingerprint(snapshot),
+        "fingerprint": _fingerprint(snapshot, intent),
         "computed_at": _now_iso(),
         "preview": preview,
         "warnings": warnings or [],
@@ -1735,7 +1789,7 @@ def _plan_envelope(command, apply_with, intent, snapshot, preview, warnings=None
 
 
 def verify_plan(inputs, fresh_snapshot):
-    """Re hash freshly read state and refuse if anything moved.
+    """Re hash freshly read state with the supplied intent; refuse if either moved.
 
     Returns None when the plan still holds. Returns a refusal envelope naming what
     changed when it does not. Used by every apply before it touches anything.
@@ -1747,13 +1801,28 @@ def verify_plan(inputs, fresh_snapshot):
             "This command only runs against an approved plan. Run the matching "
             "plan command first and pass its fingerprint back.",
         )
-    current = _fingerprint(fresh_snapshot)
+    intent = inputs.get("intent") or {}
+    current = _fingerprint(fresh_snapshot, intent)
     if current == approved:
         return None
+    drifted = _describe_drift(inputs.get("snapshot") or {}, fresh_snapshot)
+    if not drifted:
+        # The state matches what was approved, so the only thing that can have
+        # changed is the intent itself. Say so, because "the plan drifted" would
+        # send a reader looking at the group when they should be looking at the
+        # payload that reached this command.
+        drifted = [{
+            "field": "intent",
+            "note": (
+                "The state matches the approved snapshot. The intent supplied to "
+                "this apply is not the intent that was approved."
+            ),
+            "supplied": intent,
+        }]
     return {
         "approved_fingerprint": approved,
         "current_fingerprint": current,
-        "drifted": _describe_drift(inputs.get("snapshot") or {}, fresh_snapshot),
+        "drifted": drifted,
         "checked_at": _now_iso(),
     }
 

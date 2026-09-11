@@ -4,8 +4,7 @@ forty people of application access, or grant itself Super Administrator. Four or
 API calls, under a second, no preview and no way back. Which is why the honest answer to
 "should I connect an agent to my identity provider" has been no. This changes it.
 
-36 commands, 27 read and 9 write, every one run against a live Okta org. The count is
-generated from the manifest, never typed by hand.
+36 commands, 27 read and 9 write, every one run against a live Okta org.
 
 FOR: teams putting an agent near identity, and small teams carrying a compliance
 obligation without budget for Okta Identity Governance, an add on at roughly four to
@@ -14,9 +13,9 @@ eleven dollars per user per month.
 WHY IT IS DIFFERENT: most governed integrations must infer whether a change was
 authorised, because the provider keeps no usable history. Okta keeps a System Log
 recording the actor, timestamp and client IP of every administrative event. So each
-change gets a verdict rather than an estimate: governed and bound to a specific
-approval, ungoverned and attributed to a named admin at a named time from a named
-address, or unproven, reported as unproven rather than guessed.
+change gets a verdict, not an estimate: governed, made through this module's own
+credential; ungoverned, attributed to a named admin at a named time from a named
+address; or unproven, reported as unproven and never guessed.
 
 THREE THINGS A SPREADSHEET CANNOT DO. Blast radius before you act: which applications a
 person loses on deactivation, which groups they remain in, which admin roles vanish,
@@ -31,7 +30,7 @@ every statement is bounded by.
 AUTHENTICATION: OAuth 2.0 service app using private_key_jwt. Static SSWS tokens are
 deliberately unsupported: they carry no scopes and inherit the full privileges of
 whoever created them, so they cannot express the boundary this exists to enforce. A
-scoped grant can, giving two independent boundaries rather than one. The scope grant is
+scoped grant can, giving two independent boundaries instead of one. The scope grant is
 structural, the airlock procedural. Stated plainly: if the airlock were bypassed
 entirely, a read scoped token still could not deactivate anybody. Read scopes alone are
 supported, and every capability above works without a single write scope.
@@ -44,7 +43,7 @@ error. Ambiguous outcomes fail closed: a write Okta does not answer is recorded 
 unresolved, carrying the attempt and the prior state, and is reported as neither success
 nor failure.
 
-KNOWN LIMITATIONS, kept current rather than written at the end. Okta publishes no
+KNOWN LIMITATIONS, kept current, not written at the end. Okta publishes no
 maximum System Log delivery latency, so verdicts carry the log watermark they were
 computed against and report that no ungoverned change was visible as of that timestamp,
 never that none occurred. Removing a user from a rule managed group causes Okta to add

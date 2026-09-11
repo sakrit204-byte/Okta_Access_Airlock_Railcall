@@ -35,8 +35,11 @@ number of people affected before anything happens.
 
 ### 2. It refuses if the situation moved while you decided
 
-Every write has a planning twin. The plan fingerprints the exact state the change depends
-on. The apply re reads, re hashes and **refuses if anything moved**, naming what moved.
+Every write that changes standing access has a planning twin. The plan fingerprints the
+exact state the change depends on, together with the change itself. The apply re reads, re
+hashes and **refuses if either moved**, naming what moved. Suspend, unsuspend, unlock and
+credential revocation are single step and take no plan; none of them widens anybody's
+access.
 
 ```
 plan                        approval              apply
@@ -48,8 +51,9 @@ return a fingerprint   ->   a human reviews  ->   re read, re hash, compare
                                                     drift  -> refuse and name it
 ```
 
-An approval binds to **the state a human reviewed**, not to the record ids they were
-pointed at.
+An approval binds to **the state a human reviewed and the change they reviewed**, not to
+the record ids they were pointed at. Hand the apply the approved fingerprint beside a wider
+intent and it refuses, because the intent is hashed with the state.
 
 ### 3. It refuses to guess
 
@@ -73,7 +77,7 @@ module keeps, because a record we wrote about ourselves is what an auditor disco
 
 Per change, one of:
 
-* **governed**, bound to a specific approval
+* **governed**, made through this module's own credential
 * **ungoverned**, attributed to a named admin at a named time from a named IP address
 * **unproven**, which it reports as unproven instead of guessing
 
@@ -171,7 +175,8 @@ railcall set okta '{"OKTA_ORG_URL":"https://your.okta.com","OKTA_CLIENT_ID":"0oa
 ```
 
 It stays in the local Station vault. It never reaches the marketplace and is never
-written into this repository.
+written into this repository. Orgs on `okta.com`, `okta-emea.com` and `oktapreview.com`
+are all accepted; anything else is refused before a request is sent.
 
 ### 6. Verify
 
@@ -264,7 +269,7 @@ outcome one approved click away from an agent.
 
 ## The companion workflow
 
-`workflow/quarterly_access_review.json`, 14 nodes, one approval gated write.
+`workflow/quarterly_access_review.json`, 13 nodes, one approval gated write.
 
 It **refuses to start** if a scope it needs is missing, or if rate limit headroom cannot
 finish the population, because a review that silently skips a section is worse than one
@@ -282,7 +287,7 @@ the log watermark every statement is bounded by. It will not report absence.
 ## Development
 
 ```
-python -m unittest discover tests    89 offline contract tests
+python -m unittest discover tests    97 offline contract tests
 python tools/station_check.py        the station's real loading contract
 python tools/check_parity.py         manifest, handler and listing agree
 python tools/lint_listing.py         the marketplace publish gate

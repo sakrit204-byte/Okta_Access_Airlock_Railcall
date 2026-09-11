@@ -59,13 +59,6 @@
       "cond": "{{nodes.gate_budget.ok}}"
     },
     {
-      "id": "ungoverned",
-      "type": "effect",
-      "action_id": "custody_detect_ungoverned",
-      "args": {},
-      "cond": "{{nodes.gate_budget.ok}}"
-    },
-    {
       "id": "candidates",
       "type": "transform",
       "input_from": "{{nodes.review.data}}",
@@ -117,7 +110,7 @@
       "id": "claim",
       "type": "transform",
       "input_from": "{{nodes.pack.data}}",
-      "code": "pack = input or {}\nchanges = (pack.get('access_changes') or {})\ncounts = changes.get('counts') or {}\nungoverned = counts.get('ungoverned', 0)\nsystem = counts.get('system', 0)\ngoverned = counts.get('governed', 0)\nif ungoverned:\n    verdict = 'contested'\n    why = str(ungoverned) + ' access changes were visible with no governed approval behind them.'\nelif governed and not system:\n    verdict = 'governed'\n    why = 'Every visible access change was made through the module.'\nelif governed or system:\n    verdict = 'partial'\n    why = 'Visible changes are a mix of governed and Okta system originated. Okta attributes some console actions to its own system principal, so this is not proof that no person acted.'\nelse:\n    verdict = 'unproven'\n    why = 'No access change was visible in the window read. That is not evidence that none occurred.'\noutput = {'custody': verdict, 'why': why, 'log_watermark': pack.get('log_watermark'), 'log_read_complete': pack.get('log_read_complete'), 'bounded_by': 'Okta publishes no maximum System Log delivery latency, so every statement above is bounded by the watermark and never claims absence.'}"
+      "code": "pack = input or {}\nchanges = (pack.get('access_changes') or {})\ncounts = changes.get('counts') or {}\nungoverned = counts.get('ungoverned', 0)\nsystem = counts.get('system', 0)\ngoverned = counts.get('governed', 0)\nif ungoverned:\n    verdict = 'contested'\n    why = str(ungoverned) + ' access changes were visible with no governed approval behind them.'\nelif governed and not system:\n    verdict = 'governed'\n    why = 'Every visible access change was made through the module.'\nelif governed or system:\n    verdict = 'partial'\n    why = ('Visible changes are governed or Okta system originated, with none ungoverned. ' if governed else 'Every visible change is Okta system originated. ') + 'Okta attributes some console actions to its own system principal, so this is not proof that no person acted.'\nelse:\n    verdict = 'unproven'\n    why = 'No access change was visible in the window read. That is not evidence that none occurred.'\noutput = {'custody': verdict, 'why': why, 'log_watermark': pack.get('log_watermark'), 'log_read_complete': pack.get('log_read_complete'), 'bounded_by': 'Okta publishes no maximum System Log delivery latency, so every statement above is bounded by the watermark and never claims absence.'}"
     }
   ],
   "edges": [
@@ -142,10 +135,6 @@
       "to": "review"
     },
     {
-      "from": "gate_budget",
-      "to": "ungoverned"
-    },
-    {
       "from": "review",
       "to": "candidates"
     },
@@ -164,10 +153,6 @@
     {
       "from": "apply_removal",
       "to": "reconcile"
-    },
-    {
-      "from": "ungoverned",
-      "to": "pack"
     },
     {
       "from": "posture",

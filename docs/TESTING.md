@@ -305,3 +305,45 @@ and `custody.detect_ungoverned`.
 
 The org was confirmed unchanged afterwards. The demo never prints a credential, and that
 is enforced in the code rather than left to care.
+
+***
+
+**2026 09 11 · a full reread of the handler, and what it turned up.**
+
+Every line of `handlers/handler.py` read again from the top, as a reviewer would rather
+than as its author. Five changes came out of it, one of them to the core guarantee.
+
+**The approval bound to the state but not to the change.** The fingerprint hashed the
+snapshot alone. An apply carrying the approved fingerprint next to a wider intent, say
+`remove: [a]` swapped for `remove: [a, b, c]`, passed the drift check, because the group
+had not moved. The human had approved removing one person. The intent is now hashed with
+the state, so editing either changes the fingerprint, and a refusal whose state still
+matches names the intent as the thing that moved. Locked by an offline test that tampers
+the intent and expects the refusal, and the live drift demonstration was re run against
+the org afterwards: plan, a joiner, `plan_drifted`, both fingerprints, the joiner's id.
+
+**A refused read was rendered as an empty list.** `users.list_live_credentials` caught
+any error on the clients and devices endpoints and returned `[]`, and
+`radius.user_deactivation` then reported "0 refresh tokens survive". That is the
+dishonesty `_paged_optional` exists to prevent, applied one function away from it. Both
+now report `available: false` and a null count, with a warning saying why.
+
+**EMEA orgs were refused.** The host check accepted `okta.com` and `oktapreview.com`
+only. Okta serves EMEA customers from `okta-emea.com`. Accepted now, in the handler and
+in the manifest's network allowlist, and a test pins the two lists to each other.
+
+**The injection scan matched inside ordinary words.** "act as" fired on "Contact
+Assistants", "elevate" on "Elevate Marketing", and every description over 120 characters
+was flagged as unusually long. Needles are matched on word boundaries, bare verbs were
+replaced with instruction phrases, and the length rule no longer applies to description
+fields. The zero false positive figure recorded above was measured on a one user org and
+should be read that way.
+
+**The redactor knew "Bearer " and not "DPoP ".** Current orgs bind tokens with DPoP, so
+the authorization header carries that prefix. No path was found that surfaced a request
+header, and the redactor now catches both regardless.
+
+Also removed from the workflow: a node that read the System Log a second time for
+nothing, because `custody.audit_pack` reads it itself. `/logs` is the tightest bucket on
+this org at sixty calls a minute. The workflow is 13 nodes and passes the marketplace
+gate.

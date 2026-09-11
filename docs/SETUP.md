@@ -8,7 +8,8 @@ A free Okta developer org is enough and is what this module is developed against
 up at `developer.okta.com/signup`. You get a real org with a real API, which is what the
 module needs; there are no mocks anywhere in this project.
 
-Your org URL looks like `https://dev-12345678.okta.com`. Note it down.
+Your org URL looks like `https://dev-12345678.okta.com`. Note it down. EMEA orgs sit on
+`okta-emea.com` and preview orgs on `oktapreview.com`; the module accepts all three.
 
 ## 2. Create the API service application
 
