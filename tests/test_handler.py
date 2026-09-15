@@ -302,6 +302,90 @@ class AssertionTests(unittest.TestCase):
         self.assertEqual(caught.exception.code, "credential_invalid")
 
 
+class ClockSkewTests(unittest.TestCase):
+    """A wrong clock is commoner than a wrong key, and used to look like one."""
+
+    PEM = None
+
+    @classmethod
+    def setUpClass(cls):
+        from cryptography.hazmat.primitives import serialization
+        from cryptography.hazmat.primitives.asymmetric import rsa
+        key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
+        cls.PEM = key.private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        ).decode("ascii")
+
+    def setUp(self):
+        handler._CLOCK["offset"] = 0.0
+
+    def tearDown(self):
+        handler._CLOCK["offset"] = 0.0
+
+    def _client(self, responses):
+        creds = {"org_url": "https://acme.okta.com", "client_id": "0oa1", "private_key": self.PEM}
+        client = handler.OktaClient(creds)
+        calls = []
+
+        def fake_send(method, url, headers, payload):
+            calls.append((method, url))
+            return responses.pop(0)
+
+        client._send = fake_send
+        client.calls = calls
+        return client
+
+    def test_an_expired_assertion_is_reminted_in_the_servers_time(self):
+        import email.utils, time
+        ahead = email.utils.formatdate(time.time() + 6 * 3600, usegmt=True)
+        client = self._client([
+            (401, {"Date": ahead}, {"error": "invalid_client",
+                                    "error_description": "The client_assertion token is expired."}),
+            (200, {}, {"access_token": "tok", "token_type": "Bearer", "scope": "a", "expires_in": 3600}),
+        ])
+        self.assertEqual(client.access_token(["a"]), "tok")
+        self.assertEqual(len(client.calls), 2)
+        self.assertGreater(handler._CLOCK["offset"], 6 * 3600 - 60)
+
+    def test_skew_then_nonce_then_success_is_the_real_sequence(self):
+        """What a wrong clock actually produces against a live org, in order."""
+        import email.utils, time
+        ahead = email.utils.formatdate(time.time() + 19800, usegmt=True)
+        client = self._client([
+            (401, {"Date": ahead}, {"error": "invalid_client",
+                                    "error_description": "The client_assertion token is expired."}),
+            (400, {"Date": ahead, "DPoP-Nonce": "n1"}, {"error": "use_dpop_nonce",
+                                                        "error_description": "nonce required"}),
+            (200, {}, {"access_token": "tok", "token_type": "DPoP", "scope": "a", "expires_in": 3600}),
+        ])
+        self.assertEqual(client.access_token(["a"]), "tok")
+        self.assertEqual(len(client.calls), 3)
+        self.assertEqual(client._token_nonce, "n1")
+
+    def test_a_persistent_refusal_names_the_skew(self):
+        import email.utils, time
+        ahead = email.utils.formatdate(time.time() + 19800, usegmt=True)
+        refusal = (401, {"Date": ahead}, {"error": "invalid_client",
+                                          "error_description": "The client_assertion token is expired."})
+        client = self._client([refusal, refusal])
+        with self.assertRaises(handler.AirlockError) as caught:
+            client.access_token(["a"])
+        self.assertEqual(caught.exception.code, "token_denied")
+        self.assertAlmostEqual(caught.exception.detail["clock_skew_seconds"], 19800, delta=5)
+        self.assertIn("behind", caught.exception.detail["clock_note"])
+
+    def test_a_refusal_about_the_key_is_not_treated_as_a_clock_problem(self):
+        client = self._client([
+            (401, {}, {"error": "invalid_client", "error_description": "The client secret is invalid."}),
+        ])
+        with self.assertRaises(handler.AirlockError) as caught:
+            client.access_token(["a"])
+        self.assertEqual(len(client.calls), 1)
+        self.assertNotIn("clock_skew_seconds", caught.exception.detail)
+
+
 class DpopTests(unittest.TestCase):
     """DPoP binds the access token to a key, so a stolen token is unusable.
 

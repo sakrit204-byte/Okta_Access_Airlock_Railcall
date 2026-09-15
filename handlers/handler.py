@@ -6,6 +6,7 @@ from everything it returns, and fails closed when an outcome cannot be determine
 """
 
 import base64
+import email.utils
 import hashlib
 import json
 import re
@@ -22,6 +23,38 @@ TOKEN_PATH = "/oauth2/v1/token"
 HTTP_TIMEOUT_SECONDS = 30
 TOKEN_LIFETIME_SECONDS = 300
 TOKEN_REFRESH_MARGIN_SECONDS = 30
+
+# Seconds to add to this machine's clock to agree with Okta's. Zero until Okta
+# rejects an assertion as expired or not yet valid, at which point the skew is
+# measured from the Date header on that very response and the assertion is
+# minted again. A machine whose clock is wrong by more than the five minute
+# assertion lifetime otherwise gets "invalid_client" with no hint as to why,
+# and a wrong clock is a far more common fault than a wrong key.
+_CLOCK = {"offset": 0.0}
+
+
+def _now():
+    return time.time() + _CLOCK["offset"]
+
+
+def _server_skew(headers):
+    """How far this machine's clock trails the server's, from its Date header."""
+    raw = _header(headers or {}, "Date")
+    if not raw:
+        return None
+    try:
+        server = email.utils.parsedate_to_datetime(raw).timestamp()
+    except (TypeError, ValueError):
+        return None
+    return server - time.time()
+
+
+def _clock_complaint(parsed):
+    """True when Okta's refusal is about time, not about the key or the client."""
+    if not isinstance(parsed, dict) or parsed.get("error") != "invalid_client":
+        return False
+    text = str(parsed.get("error_description") or "").lower()
+    return "expired" in text or "not yet valid" in text or "iat" in text
 
 SECRET_KEYS = (
     "private_key",
@@ -535,7 +568,7 @@ class OktaClient:
 
     def access_token(self, scopes=None):
         wanted = sorted(set(scopes or self.default_scopes()))
-        if self._token and time.time() < self._token_expires_at:
+        if self._token and _now() < self._token_expires_at:
             if set(wanted).issubset(set(self._granted_scopes)):
                 return self._token
         return self._mint(wanted)
@@ -582,29 +615,58 @@ class OktaClient:
             }
             return self._send("POST", url, headers, form)
 
+        # Two things Okta may ask for before it will mint, in either order, and
+        # each is part of the protocol rather than a failure.
+        #
+        # A nonce: Okta answers the first DPoP proof with a nonce it wants
+        # echoed back. That is the documented handshake.
+        #
+        # The right time: a rejection about an expired or not yet valid
+        # assertion means this machine's clock disagrees with Okta's. The skew
+        # is measured from the Date header on that very response and the
+        # assertion is minted again in Okta's time. On a machine whose clock is
+        # wrong, the sequence is expired, then nonce, then success, so each
+        # correction is allowed to happen once and the loop is bounded.
+        skew = None
+        nonce_fixed = clock_fixed = False
         status, headers, parsed = attempt()
-
-        # Okta answers the first proof with a nonce it wants echoed back. This is
-        # the documented handshake, not a failure, so it is retried once here rather
-        # than surfaced to the caller.
-        if _wants_new_nonce(status, parsed):
-            nonce = _dpop_nonce_from(headers)
-            if nonce and nonce != self._token_nonce:
-                self._token_nonce = nonce
-                status, headers, parsed = attempt()
+        for _ in range(2):
+            if _wants_new_nonce(status, parsed) and not nonce_fixed:
+                nonce = _dpop_nonce_from(headers)
+                if nonce and nonce != self._token_nonce:
+                    self._token_nonce = nonce
+                    nonce_fixed = True
+                    status, headers, parsed = attempt()
+                    continue
+            if status == 401 and _clock_complaint(parsed) and not clock_fixed:
+                skew = _server_skew(headers)
+                if skew is not None and abs(skew - _CLOCK["offset"]) > 1:
+                    _CLOCK["offset"] = skew
+                    clock_fixed = True
+                    status, headers, parsed = attempt()
+                    continue
+            break
 
         if status != 200 or not isinstance(parsed, dict) or "access_token" not in parsed:
+            detail = {"http_status": status, "response": _redact(parsed)}
+            if skew is not None:
+                detail["clock_skew_seconds"] = int(skew)
+                detail["clock_note"] = (
+                    "This machine's clock is "
+                    + str(abs(int(skew)))
+                    + " seconds "
+                    + ("behind" if skew > 0 else "ahead of")
+                    + " Okta's. Set the system clock and time zone correctly."
+                )
             raise AirlockError(
-                "token_denied",
-                "Okta refused the client credentials grant.",
-                {"http_status": status, "response": _redact(parsed)},
+                "token_denied", "Okta refused the client credentials grant.", detail
             )
         self._token_type = parsed.get("token_type") or "Bearer"
         self._token = parsed["access_token"]
         granted = parsed.get("scope", "")
         self._granted_scopes = granted.split() if isinstance(granted, str) else []
         lifetime = _as_int(parsed.get("expires_in")) or TOKEN_LIFETIME_SECONDS
-        self._token_expires_at = time.time() + lifetime - TOKEN_REFRESH_MARGIN_SECONDS
+        self._token_expires_at = _now() + lifetime - TOKEN_REFRESH_MARGIN_SECONDS
         return self._token
 
     @property
@@ -681,7 +743,7 @@ def _client_assertion(client_id, audience, private_key_pem, key_id=None):
     header = {"alg": "RS256", "typ": "JWT"}
     if key_id:
         header["kid"] = key_id
-    issued = int(time.time())
+    issued = int(_now())
     claims = {
         "iss": client_id,
         "sub": client_id,
@@ -753,7 +815,7 @@ def _dpop_proof(key, method, url, nonce=None, access_token=None):
     claims = {
         "htm": method,
         "htu": _htu(url),
-        "iat": int(time.time()),
+        "iat": int(_now()),
         "jti": str(uuid.uuid4()),
     }
     if nonce:

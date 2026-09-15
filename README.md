@@ -287,7 +287,7 @@ the log watermark every statement is bounded by. It will not report absence.
 ## Development
 
 ```
-python -m unittest discover tests    97 offline contract tests
+python -m unittest discover tests    101 offline contract tests
 python tools/station_check.py        the station's real loading contract
 python tools/check_parity.py         manifest, handler and listing agree
 python tools/lint_listing.py         the marketplace publish gate

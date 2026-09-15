@@ -347,3 +347,31 @@ Also removed from the workflow: a node that read the System Log a second time fo
 nothing, because `custody.audit_pack` reads it itself. `/logs` is the tightest bucket on
 this org at sixty calls a minute. The workflow is 13 nodes and passes the marketplace
 gate.
+
+***
+
+**2026 09 15 · a wrong clock, and what it used to look like.**
+
+Every act of the demonstration failed with `invalid_client: The client_assertion token is
+expired`, four days after the same run had passed. Nothing in the module or the org had
+changed. The machine's clock had: its idea of UTC was 19,800 seconds behind Okta's,
+which is exactly five and a half hours, the India Standard Time offset, so the clock and
+the time zone had been set against each other. Every assertion, minted with a five
+minute lifetime from local time, arrived at Okta already expired.
+
+That failure is worth more than the fix, because of how it presented. `invalid_client`
+reads as a wrong key. A buyer would have rotated the key, checked the client id, re read
+the setup guide, and never looked at the clock. A wrong clock is a far commoner fault
+than a wrong key and the module gave no hint of it.
+
+**Now handled.** A refusal about time is recognised as such, the skew is measured from
+the Date header on that very response, and the assertion is minted again in Okta's time.
+On a skewed machine the live sequence turned out to be three steps, expired, then the
+DPoP nonce handshake, then success, so the mint loop allows each correction once and is
+bounded. If Okta still refuses, the error names the skew in seconds and which way it
+runs, so the next thing a reader checks is the right thing.
+
+**Verified live with the clock still wrong**: all five acts, plan, drift, refusal,
+custody, with 19,800 seconds of compensation applied and the org left as found. Four
+offline tests lock the sequence, the persistent refusal, and that a refusal about the
+key is never mistaken for a refusal about time.
