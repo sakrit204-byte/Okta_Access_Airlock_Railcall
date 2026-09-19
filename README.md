@@ -114,6 +114,11 @@ hand.
 
 ## Quick start
 
+**No Okta org?** A free developer org takes about five minutes at
+`developer.okta.com/signup` and is what this module is developed against. `docs/SETUP.md`
+starts there and ends at a working `org.verify_connection`. There are no mocks to fall back
+on, by design.
+
 ### 1. Install the station
 
 ```
