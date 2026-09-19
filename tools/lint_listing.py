@@ -11,6 +11,7 @@ Usage:
 
 import argparse
 import json
+import re
 import pathlib
 import sys
 import urllib.error
@@ -48,6 +49,12 @@ def local_checks(manifest, handler, description):
 
     if not commands:
         problems.append("module.json declares no commands")
+    mid = str(manifest.get("id") or "")
+    # The publish endpoint enforces this and the lint endpoint does not, so a
+    # manifest can pass every lint and still be refused at publish. Learned the
+    # hard way, with underscores.
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*)?", mid):
+        problems.append("id must be lowercase kebab-case with an optional single slash: " + mid)
 
     if len(handler.encode("utf8")) < MINIMUM_HANDLER_BYTES:
         problems.append("handler.py is under the 200 byte trivial handler threshold")

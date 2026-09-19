@@ -1,5 +1,5 @@
 {
-  "id": "sakrit204/quarterly_access_review",
+  "id": "sakrit204/quarterly-access-review",
   "title": "Quarterly Access Review, airlocked",
   "context": {
     "population_filter": "status eq \"ACTIVE\"",

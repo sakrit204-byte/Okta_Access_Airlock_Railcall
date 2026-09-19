@@ -97,7 +97,7 @@ never written into this repository, and never included in a receipt.
 ## 6. Verify
 
 ```
-railcall market install sakrit204/okta_access_airlock
+railcall market install sakrit204/okta-access-airlock
 railcall studio
 ```
 

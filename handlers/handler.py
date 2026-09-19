@@ -16,7 +16,7 @@ import urllib.parse
 import urllib.request
 import uuid
 
-MODULE_ID = "sakrit204/okta_access_airlock"
+MODULE_ID = "sakrit204/okta-access-airlock"
 VAULT_NAME = "okta"
 API_PREFIX = "/api/v1"
 TOKEN_PATH = "/oauth2/v1/token"
