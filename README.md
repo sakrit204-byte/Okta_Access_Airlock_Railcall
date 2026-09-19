@@ -216,8 +216,10 @@ token still could not deactivate anybody.**
 
 ## Trust surface
 
-* Credentials resolve through the Station vault only. This module never reads a
-  credentials file from disk, and never falls back to environment variables.
+* Credentials resolve through the Station vault only. The handler never reads a
+  credentials file from disk, and never falls back to environment variables. The
+  development scripts under `tools/` do read a local, git ignored file, because they run
+  outside the station against a live org; nothing the station loads does.
 * Network egress is allowlisted to your configured Okta org. Any other host is refused
   before the request is sent, including a paging cursor that points off the org.
 * **No subprocess. No filesystem writes.** Declared in `module.json` where they are
