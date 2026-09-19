@@ -170,13 +170,16 @@ is created either way.
 
 ### 5. Store the credential
 
-```
-railcall set okta '{"OKTA_ORG_URL":"https://your.okta.com","OKTA_CLIENT_ID":"0oa...","OKTA_KEY_ID":"...","OKTA_PRIVATE_KEY":"-----BEGIN PRIVATE KEY-----\n..."}'
-```
+Open Studio (`railcall studio`), go to **Integrations**, find **okta**, and fill the four
+fields the module declares: `OKTA_ORG_URL`, `OKTA_CLIENT_ID`, `OKTA_KEY_ID` and
+`OKTA_PRIVATE_KEY`. That form is the only way in. There is no CLI setter for module
+credentials, and an earlier version of this page said there was; following it produces
+`Unknown setting: 'okta'`.
 
-It stays in the local Station vault. It never reaches the marketplace and is never
-written into this repository. Orgs on `okta.com`, `okta-emea.com` and `oktapreview.com`
-are all accepted; anything else is refused before a request is sent.
+The station writes the entry to its local vault with owner only permissions. It never
+reaches the marketplace and is never written into this repository. Orgs on `okta.com`,
+`okta-emea.com` and `oktapreview.com` are all accepted; anything else is refused before a
+request is sent.
 
 ### 6. Verify
 

@@ -84,11 +84,12 @@ The module reads exactly one vault entry, named `okta`. It is a JSON object:
 `scopes` is optional. Leave it out and the module asks for every read scope it knows
 about, then reports which ones Okta actually granted.
 
-Store it:
-
-```
-railcall set okta '<the JSON above on one line>'
-```
+Store it through Studio. Run `railcall studio`, open **Integrations**, find **okta**, and
+paste the four values into the form the module declares: `OKTA_ORG_URL`,
+`OKTA_CLIENT_ID`, `OKTA_KEY_ID` and `OKTA_PRIVATE_KEY`. The station writes them to its
+local vault with owner only permissions. There is no CLI setter for module credentials;
+`railcall set` only knows the station's own settings and answers `Unknown setting` for
+anything else.
 
 The credential stays in the local Station vault. It is never sent to the marketplace,
 never written into this repository, and never included in a receipt.
