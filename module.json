@@ -2,7 +2,7 @@
   "id": "sakrit204/okta-access-airlock",
   "name": "Okta Access Airlock",
   "manifest_version": 2,
-  "version": "1.0.1",
+  "version": "1.0.2",
   "provider": "okta",
   "category": "Ops",
   "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",

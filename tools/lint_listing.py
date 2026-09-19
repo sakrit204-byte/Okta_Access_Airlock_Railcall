@@ -57,6 +57,15 @@ def local_checks(manifest, handler, description):
         problems.append("id must be lowercase kebab-case with an optional single slash: " + mid)
     # The marketplace's category list, as its own filter bar shows it. Anything
     # else is refused at publish, again past the lint endpoint.
+    # The marketplace renders newlines literally, so a hard wrapped paragraph
+    # shows as ragged lines on the listing page. One line per paragraph.
+    for block in re.split(r"\n\s*\n", description.strip()):
+        if "\n" in block.strip():
+            problems.append(
+                "listing description has a hard wrapped paragraph: "
+                + block.strip()[:50] + "..."
+            )
+            break
     allowed = ("CRM", "Data", "Eng", "Finance", "Marketing", "Ops", "Revenue")
     if manifest.get("category") not in allowed:
         problems.append("category must be one of " + ", ".join(allowed) + ": " + str(manifest.get("category")))
