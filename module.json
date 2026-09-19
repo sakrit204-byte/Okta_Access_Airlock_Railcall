@@ -4,7 +4,7 @@
   "manifest_version": 2,
   "version": "1.0.0",
   "provider": "okta",
-  "category": "Identity",
+  "category": "Ops",
   "description": "Governed Okta administration. Reads, plans, applies, and proves custody of every change against the Okta System Log.",
   "homepage": "https://github.com/sakrit204-byte/Okta_Access_Airlock_Railcall",
   "tests_url": "https://github.com/sakrit204-byte/Okta_Access_Airlock_Railcall/blob/main/tests/test_handler.py",

@@ -55,6 +55,11 @@ def local_checks(manifest, handler, description):
     # hard way, with underscores.
     if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*(?:/[a-z0-9]+(?:-[a-z0-9]+)*)?", mid):
         problems.append("id must be lowercase kebab-case with an optional single slash: " + mid)
+    # The marketplace's category list, as its own filter bar shows it. Anything
+    # else is refused at publish, again past the lint endpoint.
+    allowed = ("CRM", "Data", "Eng", "Finance", "Marketing", "Ops", "Revenue")
+    if manifest.get("category") not in allowed:
+        problems.append("category must be one of " + ", ".join(allowed) + ": " + str(manifest.get("category")))
 
     if len(handler.encode("utf8")) < MINIMUM_HANDLER_BYTES:
         problems.append("handler.py is under the 200 byte trivial handler threshold")
