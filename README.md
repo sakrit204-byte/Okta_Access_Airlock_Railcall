@@ -13,6 +13,10 @@ proves what it did.
 
 **36 commands. 27 read, 9 write. Every one run against a live Okta org.**
 
+Marketplace: `https://railcall.ai/marketplace/sakrit204/okta-access-airlock` · Demo film, four
+minutes fifty: `https://www.youtube.com/watch?v=uGARAVYtTCA` (every terminal frame is a replay
+of a real run, captured line by line)
+
 ***
 
 ## What it actually does
