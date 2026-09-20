@@ -283,7 +283,7 @@ outcome one approved click away from an agent.
 
 ## The companion workflow
 
-`workflow/quarterly_access_review.json`, 13 nodes, one approval gated write.
+`workflow/quarterly_access_review.json`, 14 nodes, one approval gated write.
 
 It **refuses to start** if a scope it needs is missing, or if rate limit headroom cannot
 finish the population, because a review that silently skips a section is worse than one
@@ -301,7 +301,7 @@ the log watermark every statement is bounded by. It will not report absence.
 ## Development
 
 ```
-python -m unittest discover tests    101 offline contract tests
+python -m unittest discover tests    106 offline contract tests
 python tools/station_check.py        the station's real loading contract
 python tools/check_parity.py         manifest, handler and listing agree
 python tools/lint_listing.py         the marketplace publish gate

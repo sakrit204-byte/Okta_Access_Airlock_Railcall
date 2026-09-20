@@ -21,8 +21,8 @@
     {
       "id": "gate_scopes",
       "type": "transform",
-      "input_from": "{{nodes.scopes.data}}",
-      "code": "blocked = (input or {}).get('blocked_commands') or []\nneeded = ['users.find', 'access.review_pack', 'custody.detect_ungoverned']\nmissing = [c for c in needed if c in blocked]\noutput = {'ok': not missing, 'missing_scopes_block': missing, 'granted': (input or {}).get('scopes_granted'), 'reason': 'A review that silently skips a section is worse than one that refuses to start.' if missing else 'All sections available.'}"
+      "input_from": "{{nodes.scopes._}}",
+      "code": "env = input or {}\ndata = env.get('data') or {}\nblocked = data.get('blocked_commands') or []\nneeded = ['users.find', 'access.review_pack', 'custody.detect_ungoverned']\nmissing = [c for c in needed if c in blocked]\noutput = {'ok': not missing, 'missing_scopes_block': missing, 'granted': data.get('scopes_granted'), 'reason': 'A review that silently skips a section is worse than one that refuses to start.' if missing else 'All sections available.'}"
     },
     {
       "id": "budget",
@@ -34,8 +34,8 @@
     {
       "id": "gate_budget",
       "type": "transform",
-      "input_from": "{{nodes.budget.data}}",
-      "code": "buckets = (input or {}).get('buckets') or {}\nlow = [b for b, v in buckets.items() if (v or {}).get('remaining') is not None and v['remaining'] < 25]\noutput = {'ok': not low, 'low_buckets': low, 'reason': 'Starting a review that cannot finish leaves a half read population that looks complete.' if low else 'Enough headroom to finish.'}"
+      "input_from": "{{nodes.budget._}}",
+      "code": "env = input or {}\ndata = env.get('data') or {}\nbuckets = data.get('buckets') or {}\nlow = [b for b, v in buckets.items() if (v or {}).get('remaining') is not None and v['remaining'] < 25]\noutput = {'ok': not low, 'low_buckets': low, 'reason': 'Starting a review that cannot finish leaves a half read population that looks complete.' if low else 'Enough headroom to finish.'}"
     },
     {
       "id": "posture",
@@ -61,8 +61,8 @@
     {
       "id": "candidates",
       "type": "transform",
-      "input_from": "{{nodes.review.data}}",
-      "code": "rows = (input or {}).get('rows') or []\ndormant = [r for r in rows if r.get('dormant') or r.get('never_signed_in')]\nadmin_unknown = [r for r in rows if r.get('admin_roles_available') is False]\nstanding_admin = [r for r in rows if r.get('holds_standing_admin')]\noutput = {'reviewed': len(rows), 'complete': (input or {}).get('complete'), 'dormant': [{'id': r['user']['id'], 'login': r['user']['login'], 'days': r.get('days_since_login'), 'apps': r.get('application_count')} for r in dormant], 'dormant_count': len(dormant), 'standing_admin_count': len(standing_admin), 'admin_visibility_gap': len(admin_unknown)}"
+      "input_from": "{{nodes.review._}}",
+      "code": "env = input or {}\ndata = env.get('data') or {}\nrows = data.get('rows') or []\ndormant = [r for r in rows if r.get('dormant') or r.get('never_signed_in')]\nadmin_unknown = [r for r in rows if r.get('admin_roles_available') is False]\nstanding_admin = [r for r in rows if r.get('holds_standing_admin')]\noutput = {'reviewed': len(rows), 'complete': data.get('complete'), 'dormant': [{'id': r['user']['id'], 'login': r['user']['login'], 'days': r.get('days_since_login'), 'apps': r.get('application_count')} for r in dormant], 'dormant_count': len(dormant), 'standing_admin_count': len(standing_admin), 'admin_visibility_gap': len(admin_unknown)}"
     },
     {
       "id": "revocation_plan",
@@ -81,21 +81,27 @@
       "cond": "{{ctx.revoke_group_id}}"
     },
     {
+      "id": "removal_payload",
+      "type": "transform",
+      "input_from": "{{nodes.plan_removal._}}",
+      "code": "env = input or {}\ndata = env.get('data') or {}\noutput = {'fingerprint': data.get('fingerprint'), 'intent': data.get('intent'), 'snapshot': data.get('snapshot'), 'group': (data.get('preview') or {}).get('group_name'), 'will_remove': len((data.get('intent') or {}).get('remove') or [])}"
+    },
+    {
       "id": "apply_removal",
       "type": "effect",
       "action_id": "apply_group_membership",
       "args": {
-        "fingerprint": "{{nodes.plan_removal.data.fingerprint}}",
-        "intent": "{{nodes.plan_removal.data.intent}}",
-        "snapshot": "{{nodes.plan_removal.data.snapshot}}"
+        "fingerprint": "{{nodes.removal_payload.fingerprint}}",
+        "intent": "{{nodes.removal_payload.intent}}",
+        "snapshot": "{{nodes.removal_payload.snapshot}}"
       },
       "cond": "{{ctx.revoke_group_id}}"
     },
     {
       "id": "reconcile",
       "type": "transform",
-      "input_from": "{{nodes.apply_removal.data}}",
-      "code": "counts = ((input or {}).get('counts') or {})\noutput = {'landed': counts.get('landed', 0), 'failed': counts.get('failed', 0), 'unresolved': counts.get('unresolved', 0), 'all_landed': (input or {}).get('all_landed'), 'note': 'An unresolved write raises before reaching here, so seeing this node at all means no outcome was left unknown.'}"
+      "input_from": "{{nodes.apply_removal._}}",
+      "code": "env = input or {}\ndata = env.get('data') or {}\ncounts = (data.get('counts') or {})\noutput = {'landed': counts.get('landed', 0), 'failed': counts.get('failed', 0), 'unresolved': counts.get('unresolved', 0), 'all_landed': data.get('all_landed'), 'note': 'An unresolved write raises before reaching here, so seeing this node at all means no outcome was left unknown.'}"
     },
     {
       "id": "pack",
@@ -109,8 +115,8 @@
     {
       "id": "claim",
       "type": "transform",
-      "input_from": "{{nodes.pack.data}}",
-      "code": "pack = input or {}\nchanges = (pack.get('access_changes') or {})\ncounts = changes.get('counts') or {}\nungoverned = counts.get('ungoverned', 0)\nsystem = counts.get('system', 0)\ngoverned = counts.get('governed', 0)\nif ungoverned:\n    verdict = 'contested'\n    why = str(ungoverned) + ' access changes were visible with no governed approval behind them.'\nelif governed and not system:\n    verdict = 'governed'\n    why = 'Every visible access change was made through the module.'\nelif governed or system:\n    verdict = 'partial'\n    why = ('Visible changes are governed or Okta system originated, with none ungoverned. ' if governed else 'Every visible change is Okta system originated. ') + 'Okta attributes some console actions to its own system principal, so this is not proof that no person acted.'\nelse:\n    verdict = 'unproven'\n    why = 'No access change was visible in the window read. That is not evidence that none occurred.'\noutput = {'custody': verdict, 'why': why, 'log_watermark': pack.get('log_watermark'), 'log_read_complete': pack.get('log_read_complete'), 'bounded_by': 'Okta publishes no maximum System Log delivery latency, so every statement above is bounded by the watermark and never claims absence.'}"
+      "input_from": "{{nodes.pack._}}",
+      "code": "env = input or {}\ndata = env.get('data') or {}\npack = data\nchanges = (pack.get('access_changes') or {})\ncounts = changes.get('counts') or {}\nungoverned = counts.get('ungoverned', 0)\nsystem = counts.get('system', 0)\ngoverned = counts.get('governed', 0)\nif ungoverned:\n    verdict = 'contested'\n    why = str(ungoverned) + ' access changes were visible with no governed approval behind them.'\nelif governed and not system:\n    verdict = 'governed'\n    why = 'Every visible access change was made through the module.'\nelif governed or system:\n    verdict = 'partial'\n    why = ('Visible changes are governed or Okta system originated, with none ungoverned. ' if governed else 'Every visible change is Okta system originated. ') + 'Okta attributes some console actions to its own system principal, so this is not proof that no person acted.'\nelse:\n    verdict = 'unproven'\n    why = 'No access change was visible in the window read. That is not evidence that none occurred.'\noutput = {'custody': verdict, 'why': why, 'log_watermark': pack.get('log_watermark'), 'log_read_complete': pack.get('log_read_complete'), 'bounded_by': 'Okta publishes no maximum System Log delivery latency, so every statement above is bounded by the watermark and never claims absence.'}"
     }
   ],
   "edges": [
@@ -147,10 +153,6 @@
       "to": "plan_removal"
     },
     {
-      "from": "plan_removal",
-      "to": "apply_removal"
-    },
-    {
       "from": "apply_removal",
       "to": "reconcile"
     },
@@ -161,6 +163,14 @@
     {
       "from": "pack",
       "to": "claim"
+    },
+    {
+      "from": "plan_removal",
+      "to": "removal_payload"
+    },
+    {
+      "from": "removal_payload",
+      "to": "apply_removal"
     }
   ]
 }

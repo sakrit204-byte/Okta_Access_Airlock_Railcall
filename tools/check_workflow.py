@@ -13,6 +13,7 @@ Checks the things the gate does not, and the things the gate does but late:
 """
 
 import json
+import re
 import pathlib
 import sys
 import urllib.error
@@ -61,6 +62,23 @@ def main():
     nodes = spec["nodes"]
     ids = {n["id"] for n in nodes}
     problems = []
+
+    # The station resolves {{nodes.<id>.<field>}} and {{ctx.<key>}}, two levels.
+    # A deeper binding is left as literal text and the receiving command sees a
+    # string where it expected an object. Found by the first live run, on the
+    # apply node, after the marketplace gate had passed this file three times.
+    # An effect's result is flattened to its scalar fields plus "_", the whole
+    # result. A binding such as {{nodes.scopes.data}} therefore resolves to
+    # nothing, and a transform fed by it runs on empty input. Both gates in this
+    # workflow passed vacuously that way during the first live run.
+    effect_ids = {n["id"] for n in spec["nodes"] if n.get("type") == "effect"}
+    for node in spec["nodes"]:
+        for target, field in re.findall(r"\{\{\s*nodes\.([A-Za-z0-9_]+)\.([A-Za-z0-9_]+)\s*\}\}", json.dumps(node)):
+            if target in effect_ids and field != "_":
+                problems.append(node["id"] + " binds {{nodes." + target + "." + field + "}}; an effect exposes only scalars and ._, bind ._ and read the field in code")
+    for match in re.findall(r"\{\{\s*(?:nodes|ctx)\.[A-Za-z0-9_]+(?:\.[A-Za-z0-9_]+)*\s*\}\}", json.dumps(spec)):
+        if match.count(".") > 2:
+            problems.append("binding deeper than the engine grammar, it will not resolve: " + match)
 
     for node in nodes:
         if node.get("type") == "effect":

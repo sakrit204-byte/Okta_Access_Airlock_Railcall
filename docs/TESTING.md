@@ -345,7 +345,7 @@ header, and the redactor now catches both regardless.
 
 Also removed from the workflow: a node that read the System Log a second time for
 nothing, because `custody.audit_pack` reads it itself. `/logs` is the tightest bucket on
-this org at sixty calls a minute. The workflow is 13 nodes and passes the marketplace
+this org at sixty calls a minute. The workflow is 14 nodes and passes the marketplace
 gate.
 
 ***
@@ -375,3 +375,37 @@ runs, so the next thing a reader checks is the right thing.
 custody, with 19,800 seconds of compensation applied and the org left as found. Four
 offline tests lock the sequence, the persistent refusal, and that a refusal about the
 key is never mistaken for a refusal about time.
+
+***
+
+**2026 09 20 · the workflow, executed end to end inside a running station.**
+
+Until today the workflow had passed the marketplace gate, registered its eight action ids
+in a live station, and never run. It was staged into the station's workflow directory,
+live DAG execution was enabled through the station's own policy endpoint, the plan was
+pinned with a human seal through the two step re approval ceremony, and it was run
+against the live org with the removal context pointed at a disposable group and user.
+
+**The first live run failed, and that is the reason to run things.** Nine nodes ran, then
+`apply_removal` raised inside `apply.group_membership`. Two defects in the workflow, both
+invisible to the gate and to the planner:
+
+* **Bindings one level too deep.** The engine resolves `{{nodes.<id>.<field>}}`, two
+  levels. The apply asked for `{{nodes.plan_removal.data.fingerprint}}`, so it received the
+  literal template text and called `.get` on a string. Fixed with a transform that lifts
+  the three fields the apply needs to where a two level binding reaches them. Fourteen
+  nodes now.
+* **An effect's result is flattened to its scalar fields.** Nested objects are dropped;
+  the whole result survives only under `_`. Every transform bound `{{nodes.X.data}}`, which
+  resolved to nothing, so both gates ran on empty input and passed vacuously. Every
+  transform now binds `{{nodes.X._}}` and reads `data` itself. Two rules were added to
+  `tools/check_workflow.py`, one per defect, and both refuse the previous file.
+
+**The fifth run completed.** All fourteen nodes, plan and apply included; the leaver was
+removed from the group and Okta confirmed it on a fresh read; the run receipt carries an
+integrity root and the station's signature and verifies offline. Fixtures removed, org
+left as found.
+
+Also hardened in the module: every plan backed apply now accepts `intent` and `snapshot`
+as JSON strings as well as objects, and refuses anything else naming the type it
+received, because "AttributeError" alone cost a run to diagnose.

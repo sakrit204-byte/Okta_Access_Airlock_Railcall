@@ -753,6 +753,36 @@ class PlanVerificationTests(unittest.TestCase):
         )
 
 
+class StructuredInputTests(unittest.TestCase):
+    """A workflow engine may render an object argument into a JSON string.
+
+    The first live run of the companion workflow did exactly that for the
+    plan's intent and snapshot, and the apply raised AttributeError on `.get`.
+    """
+
+    def test_a_dict_passes_through(self):
+        self.assertEqual(handler._structured({"intent": {"a": 1}}, "intent"), {"a": 1})
+
+    def test_a_json_string_is_parsed(self):
+        self.assertEqual(handler._structured({"intent": '{"a": 1}'}, "intent"), {"a": 1})
+
+    def test_missing_is_empty(self):
+        self.assertEqual(handler._structured({}, "intent"), {})
+
+    def test_anything_else_is_refused_with_its_shape(self):
+        with self.assertRaises(handler.AirlockError) as caught:
+            handler._structured({"intent": "not json"}, "intent")
+        self.assertEqual(caught.exception.code, "input_invalid")
+        self.assertIn("str", caught.exception.message)
+
+    def test_verify_plan_accepts_string_intent_and_snapshot(self):
+        snapshot = {"group_id": "g1", "member_ids": ["u1"], "member_count": 1}
+        intent = {"group_id": "g1", "add": [], "remove": ["u1"]}
+        inputs = {"fingerprint": handler._fingerprint(snapshot, intent),
+                  "intent": json.dumps(intent), "snapshot": json.dumps(snapshot)}
+        self.assertIsNone(handler.verify_plan(inputs, snapshot))
+
+
 class CustodyTests(unittest.TestCase):
     """Who made a change, and does it count as governed."""
 

@@ -1850,6 +1850,34 @@ def _plan_envelope(command, apply_with, intent, snapshot, preview, warnings=None
     }
 
 
+def _structured(inputs, name):
+    """Return inputs[name] as a dict, accepting a JSON string form.
+
+    Found by the first live run of the companion workflow: the station rendered
+    the plan's intent and snapshot into the apply's arguments as JSON strings,
+    and `.get` on a string raised inside the apply. A string that parses to an
+    object is accepted; anything else is refused with what was received, so the
+    next person sees the shape rather than an exception name.
+    """
+    value = inputs.get(name)
+    if value is None or value == "":
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except ValueError:
+            parsed = None
+        if isinstance(parsed, dict):
+            return parsed
+    raise AirlockError(
+        "input_invalid",
+        name + " must be an object, or a JSON string encoding one. Received "
+        + type(value).__name__ + ": " + str(value)[:80],
+    )
+
+
 def verify_plan(inputs, fresh_snapshot):
     """Re hash freshly read state with the supplied intent; refuse if either moved.
 
@@ -1863,11 +1891,11 @@ def verify_plan(inputs, fresh_snapshot):
             "This command only runs against an approved plan. Run the matching "
             "plan command first and pass its fingerprint back.",
         )
-    intent = inputs.get("intent") or {}
+    intent = _structured(inputs, "intent")
     current = _fingerprint(fresh_snapshot, intent)
     if current == approved:
         return None
-    drifted = _describe_drift(inputs.get("snapshot") or {}, fresh_snapshot)
+    drifted = _describe_drift(_structured(inputs, "snapshot"), fresh_snapshot)
     if not drifted:
         # The state matches what was approved, so the only thing that can have
         # changed is the intent itself. Say so, because "the plan drifted" would
@@ -3043,7 +3071,7 @@ def _apply_result(command, intent, results, extra=None):
 def apply_group_membership(inputs, context):
     """Apply an approved membership change, refusing if the state moved."""
     fingerprint = inputs.get("fingerprint")
-    intent = inputs.get("intent") or {}
+    intent = _structured(inputs, "intent")
     group_id = intent.get("group_id") or inputs.get("group_id")
     if not fingerprint:
         raise AirlockError(
@@ -3118,7 +3146,7 @@ def _lifecycle(command, action, path_suffix, reversible_note):
     """Build one user lifecycle apply. They differ only in path and wording."""
 
     def run(inputs, context):
-        user_id = inputs.get("user_id") or (inputs.get("intent") or {}).get("user_id")
+        user_id = inputs.get("user_id") or _structured(inputs, "intent").get("user_id")
         if not user_id:
             raise AirlockError("input_missing", "user_id is required.")
         client = _client()
@@ -3227,7 +3255,7 @@ def apply_revoke_live_credentials(inputs, context):
     hide a partial result, which here means someone keeps access nobody thinks
     they have.
     """
-    user_id = inputs.get("user_id") or (inputs.get("intent") or {}).get("user_id")
+    user_id = inputs.get("user_id") or _structured(inputs, "intent").get("user_id")
     if not user_id:
         raise AirlockError("input_missing", "user_id is required.")
 
@@ -3284,7 +3312,7 @@ def apply_revoke_live_credentials(inputs, context):
 @_guard("apply.reset_factors")
 def apply_reset_factors(inputs, stamp):
     """Reset a user's authenticators against an approved plan."""
-    user_id = inputs.get("user_id") or (inputs.get("intent") or {}).get("user_id")
+    user_id = inputs.get("user_id") or _structured(inputs, "intent").get("user_id")
     if not user_id:
         raise AirlockError("input_missing", "user_id is required.")
 
@@ -3338,7 +3366,7 @@ def apply_reset_factors(inputs, stamp):
 def apply_group_sync(inputs, stamp):
     """Reconcile a group to an approved member list, refusing if it moved."""
     fingerprint = inputs.get("fingerprint")
-    intent = inputs.get("intent") or {}
+    intent = _structured(inputs, "intent")
     group_id = intent.get("group_id") or inputs.get("group_id")
     if not fingerprint:
         raise AirlockError(
@@ -3416,7 +3444,7 @@ def apply_offboard_user(inputs, stamp):
     nobody thinks they have.
     """
     fingerprint = inputs.get("fingerprint")
-    intent = inputs.get("intent") or {}
+    intent = _structured(inputs, "intent")
     user_id = intent.get("user_id") or inputs.get("user_id")
     if not fingerprint:
         raise AirlockError(
