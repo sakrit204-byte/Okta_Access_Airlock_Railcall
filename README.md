@@ -141,7 +141,9 @@ Under **Client Credentials**, set client authentication to **Public key / Privat
 
 **Generate the key pair yourself and paste only the public half into Okta**, so the
 private key never leaves your machine and Okta never holds it. Okta accepts a JWK in that
-field. `docs/SETUP.md` has the exact commands.
+field, and `python tools/setup_okta.py keygen` writes the private half locally and prints
+the JWK to paste. The same tool prints the vault fields and runs a real connection check
+before you open Studio. `docs/SETUP.md` has the exact commands.
 
 ### 3. Grant scopes
 
@@ -301,7 +303,7 @@ the log watermark every statement is bounded by. It will not report absence.
 ## Development
 
 ```
-python -m unittest discover tests    153 offline contract tests
+python -m unittest discover tests    157 offline contract tests
 python tools/station_check.py        the station's real loading contract
 python tools/check_parity.py         manifest, handler and listing agree
 python tools/lint_listing.py         the marketplace publish gate
@@ -329,7 +331,7 @@ unexpected file is exactly what a list misses.
 
 ## Documentation
 
-* **`docs/LIMITATIONS.md`** holds nineteen entries covering what this module cannot do
+* **`docs/LIMITATIONS.md`** holds twenty entries covering what this module cannot do
   and why, most of them found by running it. Written as the build went, not at the end.
 * `docs/SETUP.md` covers the Okta app in detail, including generating the key pair
   locally.

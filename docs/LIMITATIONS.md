@@ -430,7 +430,31 @@ token from writing. But it does not mean the reads run unattended. An operator w
 unattended reads should know that the gate sits above this module and is not something
 this module can waive, which is the correct place for it to sit.
 
-## 19. Scope of the claim
+## 19. The default scope set is read only, and that can look like a bug
+
+Leave `scopes` out of the vault entry and the module asks Okta for the five read scopes
+and nothing else. That is the right default: the product's argument is that read only is
+a sensible way to run this, and a module should not quietly request the power to change
+your directory.
+
+It has a sharp edge. A user who grants `okta.users.manage` in the Okta console, then
+stores the four required fields and nothing more, has a token that never carried the
+write scope. Every apply command then fails on insufficient scope, and nothing about the
+error points at the vault entry, because the grant in Okta really is correct.
+
+**What was done.** `org.verify_connection` already reports each write scope as granted
+and usable separately, so the two states are distinguishable once you look.
+`docs/SETUP.md` now says the default is read only and that a granted write scope must be
+listed, `tools/setup_okta.py fields` prints the scopes line alongside the other values,
+and the same tool's `verify` asks for every scope the module knows so a check never
+under reports what your org would allow.
+
+**What was not done.** The default was left alone. Making it request writes
+automatically would mean the module asks for power the user did not point it at, and on
+an org that refuses a grant containing an ungranted scope it would break read only setups
+outright. The tool carries a fallback for that case; the module does not need one.
+
+## 20. Scope of the claim
 
 This module produces evidence that a human reviews. It is a human in the loop record,
 not a certified compliance product, and it does not by itself satisfy any control in

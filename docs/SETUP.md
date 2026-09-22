@@ -24,13 +24,29 @@ Now switch the client authentication method:
 
 5. Under **Client Credentials**, choose **Edit**.
 6. Set **Client authentication** to **Public key / Private key**.
-7. Under **PUBLIC KEYS**, choose **Add key**, then **Generate new key**.
-8. Okta shows you the private key **once**. Copy it in PEM form and keep it somewhere
-   safe. It is never shown again, and it never gets uploaded anywhere by this module.
-9. Save.
 
-Record the **Client ID** from the General tab, and the **Key ID** (`kid`) shown next to
-the public key you just added.
+Okta offers to generate the signing key for you. Do not take it. Okta would then hold
+the private half, and the boundary this whole module rests on gets weaker before it has
+run once. Generate the pair on your own machine instead:
+
+```
+python tools/setup_okta.py keygen
+```
+
+That writes the private half to `.secrets/okta_private_key.pem`, which never leaves your
+machine and is excluded from the signed module tree, and prints the public half as a JWK
+along with the key id it generated.
+
+7. Under **PUBLIC KEYS**, choose **Add key**, then the **JSON** tab.
+8. Paste the JWK the command printed. Save.
+
+Okta now holds only the public half. Record the **Client ID** from the General tab; the
+**Key ID** is the `kid` the command printed, and Okta will show the same value next to
+the key.
+
+If you would rather use Okta's **Generate new key** button, the module works the same
+way. Copy the PEM Okta shows you once, save it as `.secrets/okta_private_key.pem`, and
+carry on. You are accepting that Okta generated and displayed your private key.
 
 ## 3. Grant scopes
 
@@ -46,12 +62,16 @@ Read scopes, which cover discovery, blast radius and custody:
 * `okta.roles.read`
 * `okta.apps.read`
 
-Write scopes, each of which enables a specific set of apply commands:
+Write scopes. There are two, and that is the complete list:
 
 * `okta.users.manage` for suspend, unsuspend, unlock, deactivate, offboard, reset
   factors, and revoking live credentials
 * `okta.groups.manage` for group membership and group sync
-* `okta.roles.manage` for administrative role changes
+
+The module never asks for `okta.roles.manage`. It reads administrative role assignments
+to measure blast radius and reconciles role changes from the System Log, but it does not
+change them, so granting that scope would hand it a power it has no command for. Grant
+it only if some other integration in the same application needs it.
 
 **Start with read scopes only.** Run the module, look at what it reports, and add write
 scopes when you have decided you want them. That order is the whole point of the
@@ -81,12 +101,29 @@ The module reads exactly one vault entry, named `okta`. It is a JSON object:
 }
 ```
 
-`scopes` is optional. Leave it out and the module asks for every read scope it knows
-about, then reports which ones Okta actually granted.
+`scopes` is optional, and the default is read only. Leave it out and the module asks
+for the five read scopes and nothing else, so **a write scope you granted in step 3 is
+never requested and every apply command fails**. If you granted write scopes, set the
+field explicitly and list them:
+
+```
+"scopes": "okta.users.read okta.groups.read okta.logs.read okta.roles.read okta.apps.read okta.users.manage okta.groups.manage"
+```
+
+Okta issues the intersection of what you ask for and what you granted, so asking for a
+scope you have not granted costs you nothing but that scope.
 
 Store it through Studio. Run `railcall studio`, open **Integrations**, find **okta**, and
-paste the four values into the form the module declares: `OKTA_ORG_URL`,
-`OKTA_CLIENT_ID`, `OKTA_KEY_ID` and `OKTA_PRIVATE_KEY`. The station writes them to its
+paste the values into the form the module declares: `OKTA_ORG_URL`, `OKTA_CLIENT_ID`,
+`OKTA_KEY_ID`, `OKTA_PRIVATE_KEY`, and `OKTA_SCOPES` if you granted writes. To have
+those printed for you, ready to paste:
+
+```
+python tools/setup_okta.py fields --org-url https://dev-12345678.okta.com --client-id 0oa... --key-id <kid>
+```
+
+It reads the PEM from the file and prints its length and first line rather than the key
+itself. The station writes them to its
 local vault with owner only permissions. There is no CLI setter for module credentials;
 `railcall set` only knows the station's own settings and answers `Unknown setting` for
 anything else.
@@ -104,6 +141,17 @@ railcall studio
 Run `org.verify_connection`. A healthy result lists every scope you granted, confirms
 each one with a real read against your org, and names any command that is unavailable.
 
+You can run the same check from a terminal before you touch Studio at all, which is the
+fastest way to find a setup mistake:
+
+```
+python tools/setup_okta.py verify --org-url https://dev-12345678.okta.com --client-id 0oa... --key-id <kid>
+```
+
+It calls the real command against your real org, asks for every scope the module knows
+so nothing is under reported, and prints what Okta granted, whether your admin role
+permits writes, and which commands are blocked and why.
+
 ## Troubleshooting
 
 **`credential_missing`**
@@ -113,6 +161,9 @@ No `okta` entry in the vault. Step 5.
 The private key was pasted with literal `\n` sequences rather than real newlines, or the
 BEGIN and END lines were lost. Re paste it, or store the JSON from a file rather than
 typing it at a shell prompt.
+
+**Writes fail with an insufficient scope error even though I granted the write scopes**
+The `scopes` field was left out, so the module only asked for the read scopes. Step 5.
 
 **`token_denied`**
 Okta refused the client credentials grant. The usual causes are a client authentication

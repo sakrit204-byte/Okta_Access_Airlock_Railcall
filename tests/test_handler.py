@@ -12,6 +12,8 @@ itself.
 import json
 import pathlib
 import sys
+import io
+import tempfile
 import unittest
 
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent / "handlers"))
@@ -1036,6 +1038,76 @@ def _unb64(segment):
 
     padding = "=" * (-len(segment) % 4)
     return base64.urlsafe_b64decode(segment + padding).decode("utf8")
+
+
+class SetupToolTests(unittest.TestCase):
+    """The setup tool has to be honest about scopes and silent about keys."""
+
+    def _tool(self):
+        import importlib.util
+        root = pathlib.Path(__file__).resolve().parent.parent
+        spec = importlib.util.spec_from_file_location(
+            "setup_okta", str(root / "tools" / "setup_okta.py"))
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    class _Args:
+        def __init__(self, **kw):
+            self.__dict__.update(kw)
+
+    def test_every_known_scope_covers_reads_and_writes(self):
+        scopes = self._tool()._every_known_scope()
+        for scope in handler.SCOPE_PROBES:
+            self.assertIn(scope, scopes)
+        for scope in handler.WRITE_SCOPES:
+            self.assertIn(scope, scopes)
+
+    def test_credential_omits_scopes_unless_asked(self):
+        tool = self._tool()
+        key = pathlib.Path(tempfile.gettempdir()) / "airlock_setup_test.pem"
+        key.write_text("-----BEGIN PRIVATE KEY-----" + '\\n' + "x"
+                       + '\\n' + "-----END PRIVATE KEY-----" + '\\n',
+                       encoding="utf8")
+        try:
+            args = self._Args(key_file=str(key), key_id="kid1",
+                              org_url="https://dev.okta.com/", client_id="cid", scopes=None)
+            cred = tool._credential(args)
+            self.assertNotIn("OKTA_SCOPES", cred)
+            self.assertEqual(cred["OKTA_ORG_URL"], "https://dev.okta.com")
+            args.scopes = "okta.users.read"
+            self.assertEqual(tool._credential(args)["OKTA_SCOPES"], "okta.users.read")
+        finally:
+            key.unlink()
+
+    def test_credential_refuses_a_missing_key_file(self):
+        tool = self._tool()
+        missing = pathlib.Path(tempfile.gettempdir()) / "airlock_absent_key.pem"
+        if missing.exists():
+            missing.unlink()
+        args = self._Args(key_file=str(missing), key_id="kid1",
+                          org_url="https://dev.okta.com", client_id="cid", scopes=None)
+        self.assertIsNone(tool._credential(args))
+
+    def test_report_never_prints_key_material(self):
+        tool = self._tool()
+        result = {"data": {"org_host": "dev.okta.com", "auth_method": "oauth2_private_key_jwt",
+                           "scopes_granted": ["okta.users.read"], "read_scope_probes": [],
+                           "admin_role_permits_writes": True,
+                           "write_scopes": [{"scope": "okta.users.manage",
+                                             "granted": True, "usable": True}],
+                           "blocked_commands": []}, "warnings": []}
+        buffer = io.StringIO()
+        held = sys.stdout
+        sys.stdout = buffer
+        try:
+            tool._report(result)
+        finally:
+            sys.stdout = held
+        printed = buffer.getvalue()
+        self.assertNotIn("MII", printed)
+        self.assertNotIn("PRIVATE KEY", printed)
+        self.assertIn("okta.users.manage", printed)
 
 
 if __name__ == "__main__":
