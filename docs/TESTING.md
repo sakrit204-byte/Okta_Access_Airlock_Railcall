@@ -412,6 +412,53 @@ received, because "AttributeError" alone cost a run to diagnose.
 
 ***
 
+### 2026 09 22: the setup path, run as a stranger would run it
+
+`tools/setup_okta.py` was built to make the README's claim true, that the key pair is
+generated locally and Okta never holds the private half. Then it was run against the
+live org.
+
+`keygen` generated a 2048 bit RSA pair, wrote the private half to a file, printed the
+public half as a JWK with a generated `kid`, and refused to overwrite an existing key
+without `--force`. On Windows it says plainly that the POSIX mode it sets is not
+enforced and the file inherits the profile ACL, because claiming otherwise would be the
+kind of quiet lie this project exists to avoid.
+
+`fields` printed the vault values with the private key replaced by its length and its
+first line. Checked for key material in the output: zero occurrences.
+
+`verify` called `org.verify_connection` against the real org:
+
+```
+org            integrator-6383370.okta.com
+auth           oauth2_private_key_jwt
+scopes granted 7
+admin role permits writes: True
+   okta.users.manage      granted=True  usable=True
+   okta.groups.manage     granted=True  usable=True
+No commands are blocked. Every one of the 36 is available.
+```
+
+**Two defects this run exposed, both in what was already shipping.**
+
+The first run of `verify` reported both write scopes as `granted=False` and nine commands
+unavailable, against an org that had granted them. The tool had omitted `scopes`, and the
+module's default is the five read scopes, so the write scopes were never requested. That
+is not only a flaw in the tool. Any user who grants a write scope in Okta and then stores
+the four required fields gets the same silent result, and the error points at Okta rather
+than at the vault entry. Recorded as LIMITATIONS 19, documented in `SETUP.md`, and the
+tool now asks for every scope the module knows so a check cannot under report. The module
+default was left alone on purpose.
+
+Confirmed by the run above that Okta issues the intersection rather than refusing the
+whole grant, so asking for more than was granted is safe. The tool still falls back to
+reads alone if some org disagrees.
+
+The second: `SETUP.md` told users to grant `okta.roles.manage`. Nothing in the module
+uses it. Role assignments are read for blast radius and role changes are reconciled from
+the System Log, but none are written. A product whose argument is least privilege was
+asking for surplus privilege in its own setup guide. Removed.
+
 ## Layer 3: mutation testing
 
 A passing suite proves the code does what the tests say. It does not prove the tests
@@ -440,7 +487,7 @@ untested. Eleven of `_paged_optional` survived, so "not permitted to see" collap
 test, so the egress check on a paging cursor was a documented claim with nothing behind
 it.
 
-**After: 126 of 132 caught, with 153 offline tests.** Every `_settle`, `_apply_result`
+**After: 126 of 132 caught, with 153 offline tests at the time of that run.** Every `_settle`, `_apply_result`
 and `_paged_optional` mutant is dead, the Link header path is covered including a next
 link pointing off the allowed host, and both halves of the egress guard are pinned.
 
