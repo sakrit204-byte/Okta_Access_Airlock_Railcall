@@ -201,13 +201,14 @@ UNTRUSTED_LENGTH_LIMIT = 120
 def _needle_matches(needle, lowered):
     """Match as whole words, so "act as" cannot fire inside "contact assistant".
 
-    A needle that begins or ends in punctuation, such as "system:" or "http://",
-    cannot sit inside an ordinary word and is matched as a plain substring.
+    Each end is judged on its own. A needle ending in punctuation, "system:",
+    still needs a boundary at the end that is a word character, otherwise
+    "filesystem:" reads as an instruction. Found by mutation testing: the rule
+    used to drop both boundaries as soon as either end was punctuation.
     """
-    if not needle[0].isalnum() or not needle[-1].isalnum():
-        return needle in lowered
-    pattern = r"(?<![a-z0-9])" + re.escape(needle) + r"(?![a-z0-9])"
-    return re.search(pattern, lowered) is not None
+    before = r"(?<![a-z0-9])" if needle[0].isalnum() else ""
+    after = r"(?![a-z0-9])" if needle[-1].isalnum() else ""
+    return re.search(before + re.escape(needle) + after, lowered) is not None
 
 
 def _scan_untrusted(value, field_name=None):

@@ -301,16 +301,19 @@ the log watermark every statement is bounded by. It will not report absence.
 ## Development
 
 ```
-python -m unittest discover tests    106 offline contract tests
+python -m unittest discover tests    153 offline contract tests
 python tools/station_check.py        the station's real loading contract
 python tools/check_parity.py         manifest, handler and listing agree
 python tools/lint_listing.py         the marketplace publish gate
 python tools/check_workflow.py       the workflow publish gate
 python tools/check_publishable.py    nothing secret reaches the published tree
+python tools/mutation_test.py        break the handler on purpose, see if the suite notices
 python tools/live_probe.py           read only probe of a real org
 ```
 
-The first six run in CI on every push. They check different things and passing one says
+The first six run in CI on every push. `mutation_test.py` is a periodic audit rather
+than a gate, because it reruns the whole suite once per mutation and takes minutes; the
+latest score is in `docs/TESTING.md`. They check different things and passing one says
 nothing about the others: the listing gate accepted a manifest the station could not
 load, the station loaded a handler the listing gate rejected, and the workflow gate
 derived action ids the station would not have resolved.

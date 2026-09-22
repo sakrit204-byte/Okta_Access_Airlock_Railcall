@@ -409,3 +409,57 @@ left as found.
 Also hardened in the module: every plan backed apply now accepts `intent` and `snapshot`
 as JSON strings as well as objects, and refuses anything else naming the type it
 received, because "AttributeError" alone cost a run to diagnose.
+
+***
+
+## Layer 3: mutation testing
+
+A passing suite proves the code does what the tests say. It does not prove the tests
+would notice if the code stopped doing it. `tools/mutation_test.py` breaks one line of
+the handler at a time and reruns the whole suite against the broken copy. A mutation the
+suite still passes is a line nothing defends.
+
+```
+python tools/mutation_test.py          the safety critical functions
+python tools/mutation_test.py --all    every function in the handler
+```
+
+It mutates comparisons, boolean operators, negations, constants, and it deletes `raise`
+statements one at a time. That last operator matters most here, because this module's
+central claim is that it refuses: on drift, on a set still moving, on an outcome nobody
+can determine. A `raise` that can be deleted without a test failing is a refusal nobody
+is checking.
+
+**2026 09 21 · first run: 86 of 136 caught, and the survivors were the headline claims.**
+
+All fourteen mutations of `_settle` survived, so the three outcome model could be
+rewired freely without a test noticing. Seven of `_apply_result` survived, including the
+deleted `raise`, so "an unknown outcome never returns" was asserted in the README and
+untested. Eleven of `_paged_optional` survived, so "not permitted to see" collapsing into
+"empty" would have gone unseen. The Link header paging branch was never entered by any
+test, so the egress check on a paging cursor was a documented claim with nothing behind
+it.
+
+**After: 126 of 132 caught, with 153 offline tests.** Every `_settle`, `_apply_result`
+and `_paged_optional` mutant is dead, the Link header path is covered including a next
+link pointing off the allowed host, and both halves of the egress guard are pinned.
+
+**What mutation testing found in the code, not just in the tests.** `_needle_matches`
+dropped both word boundaries as soon as either end of a pattern was punctuation, so
+`system:` matched inside `Filesystem:` and flagged an ordinary word as a role hijack.
+Each end is now judged on its own. The zero false positive figure recorded earlier was
+measured against one org's real data and remains true of it; this was reachable and
+nobody had reached it.
+
+**The six survivors, and why each is equivalent rather than a gap.**
+
+| Survivor | Why no test can kill it |
+|---|---|
+| `_paged` `cap=1000` | a default argument; changing it to 1001 alters nothing any caller reaches |
+| `_settled_members` `cap=1000` | same |
+| `_paged_optional` `cap=1000` | same |
+| `_paged` `limit` default `200` | only used when a query omits a limit, and a page of 201 behaves as a page of 200 |
+| `_paged` `split(API_PREFIX, 1)` | the prefix occurs once in a path, so a maxsplit of 2 is identical |
+| `_structured` `str(value)[:80]` | an error message truncated at 81 characters instead of 80 |
+
+Reported honestly rather than removed from the denominator.
